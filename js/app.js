@@ -252,7 +252,9 @@ function openCadModal(layers, insunits, filename) {
   // 옵션 기본값 채우기
   for (const [k, v] of Object.entries(o)) {
     const inp = document.getElementById(`opt-${k}`);
-    if (inp) inp.value = v;
+    if (!inp) continue;
+    if (inp.type === "checkbox") inp.checked = !!v;
+    else inp.value = v;
   }
   $("cad-summary").textContent =
     `${filename} · 레이어 ${Object.keys(layers).length}개 · 도형 ${cadPrimitives.length}개`
@@ -282,15 +284,16 @@ function currentMapping() {
 }
 function currentOptions() {
   const o = {};
-  for (const k of ["scale", "wallHeight", "wallThickness", "columnHeight", "slabThickness", "roofThickness", "roofElevation"]) {
+  for (const k of ["scale", "wallHeight", "wallThickness", "wallPairMaxGap", "wallJoinGap", "columnHeight", "slabThickness", "roofThickness", "roofElevation"]) {
     const inp = document.getElementById(`opt-${k}`);
     o[k] = inp ? parseFloat(inp.value) : 0;
   }
+  o.pairWalls = document.getElementById("opt-pairWalls")?.checked ?? true;
   if (!o.roofThickness) o.roofThickness = o.slabThickness; // 입력칸 없는 항목 보정
   return o;
 }
 function updateCadPreview() {
-  const c = preview(cadPrimitives, currentMapping());
+  const c = preview(cadPrimitives, currentMapping(), currentOptions());
   $("cad-preview").textContent = `예상 생성: 벽 ${c.wall} · 기둥 ${c.column} · 바닥 ${c.slab} · 지붕 ${c.roof}`;
 }
 
