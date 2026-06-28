@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BIMelang</title>
+  <link rel="stylesheet" href="./css/style.css" />
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="index.html" title="홈으로">
+      <span class="logo">▦</span>
+      <div>
+        <strong>빔이랑</strong><span class="sub">BIMelang</span>
+      </div>
+    </a>
+    <div class="toolbar">
+      <label class="btn">
+        업로드(JSON)
+        <input id="file-input" type="file" accept=".json,application/json" hidden />
+      </label>
+      <button class="btn" id="btn-download">다운로드(JSON)</button>
+      <button class="btn" id="btn-export-ifc">IFC 내보내기</button>
+      <span class="divider"></span>
+      <button class="btn mode active" id="mode-translate" data-mode="translate">이동 (1)</button>
+      <button class="btn mode" id="mode-scale" data-mode="scale">크기 (2)</button>
+      <button class="btn mode" id="mode-rotate" data-mode="rotate">회전 (3)</button>
+      <span class="divider"></span>
+      <button class="btn" id="btn-add-wall">+ 벽</button>
+      <button class="btn" id="btn-add-slab">+ 슬래브</button>
+      <button class="btn danger" id="btn-delete">선택 삭제</button>
+      <span class="divider"></span>
+      <button class="btn ghost" id="btn-sample">샘플 불러오기</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <div id="viewport"></div>
+    <aside class="panel">
+      <section class="panel-section">
+        <h2>프로젝트</h2>
+        <label class="field">
+          <span>이름</span>
+          <input id="proj-name" type="text" />
+        </label>
+        <div class="meta">
+          <span>요소 <b id="count-elements">0</b>개</span>
+          <span>단위 mm</span>
+        </div>
+      </section>
+
+      <section class="panel-section" id="inspector">
+        <h2>요소 속성</h2>
+        <p class="hint" id="inspector-hint">3D 뷰에서 요소를 클릭해 선택하세요.</p>
+        <div id="inspector-fields" hidden></div>
+      </section>
+
+      <section class="panel-section">
+        <h2>요소 목록</h2>
+        <ul id="element-list" class="element-list"></ul>
+      </section>
+    </aside>
+  </main>
+
+  <footer class="statusbar">
+    <span id="status">준비됨</span>
+    <span class="tip">선택 후 → 방향키: 동서남북 이동 · PgUp/PgDn: 상하 · Shift: 큰 단위 · 기즈모 드래그: 이동/크기/회전</span>
+  </footer>
+
+  <script type="module" src="./js/app.js"></script>
+</body>
+</html>
