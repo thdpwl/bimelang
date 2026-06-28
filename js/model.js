@@ -58,6 +58,20 @@ export function createSlab(over = {}) {
   };
 }
 
+export function createColumn(over = {}) {
+  return {
+    id: nextId("c"),
+    type: "column",
+    name: "기둥",
+    position: [0, 0],
+    width: 400,
+    depth: 400,
+    height: 3000,
+    elevation: 0,
+    ...over,
+  };
+}
+
 // 데모용 샘플: 바닥 슬래브 + 사각형 외벽 4면
 export function sampleModel() {
   _seq = 1;

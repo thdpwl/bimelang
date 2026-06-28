@@ -21,8 +21,23 @@ export function translateElement(el, dx, dy, dz) {
   } else if (el.type === "slab") {
     el.polygon = el.polygon.map(([x, y]) => [x + dx, y + dy]);
     el.elevation = (el.elevation || 0) + dz;
+  } else if (el.type === "column") {
+    el.position = [el.position[0] + dx, el.position[1] + dy];
+    el.elevation = (el.elevation || 0) + dz;
   }
   return el;
+}
+
+// 기즈모 변형 → 기둥 파라미터 (회전은 MVP에서 미적용)
+export function decomposeColumn({ pos, scale, geomParams }) {
+  const w = (geomParams.width * scale.x) / S;
+  const h = (geomParams.height * scale.y) / S;
+  const d = (geomParams.depth * scale.z) / S;
+  return {
+    position: [pos.x / S, pos.z / S],
+    width: w, depth: d, height: h,
+    elevation: pos.y / S - h / 2,
+  };
 }
 
 // 기즈모 변형(position/scale/rotationY) → 벽 파라미터
