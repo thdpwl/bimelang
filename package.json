@@ -1,0 +1,11 @@
+{
+  "name": "bimelang",
+  "version": "0.1.0",
+  "private": true,
+  "description": "웹에서 동작하는 인공지능 기반 건축모델링 서비스 (MVP)",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  }
+}
