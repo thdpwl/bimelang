@@ -145,6 +145,15 @@ a { color: inherit; }
 .cta-band h3 { margin: 0 0 6px; font-size: 22px; }
 .cta-band p { margin: 0; color: var(--muted); }
 
+/* CAD flow */
+.cad-flow { display: flex; align-items: stretch; gap: 12px; margin-top: 36px; flex-wrap: wrap; }
+.cad-step { flex: 1; min-width: 160px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 20px; }
+.cad-step .n { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; background: var(--accent); color: #fff; font-weight: 700; margin-bottom: 12px; }
+.cad-step b { display: block; margin-bottom: 6px; }
+.cad-step p { margin: 0; color: var(--muted); font-size: 13px; }
+.cad-arrow { display: flex; align-items: center; color: var(--accent); font-size: 22px; }
+code { background: var(--bg-2); border: 1px solid var(--line); border-radius: 4px; padding: 1px 6px; font-size: 13px; }
+
 /* Footer */
 .footer {
   display: flex; justify-content: space-between; align-items: center;
@@ -158,5 +167,6 @@ a { color: inherit; }
   .hero-visual { height: 280px; }
   .hero h1 { font-size: 38px; }
   .cards, .features { grid-template-columns: 1fr; }
+  .cad-arrow { display: none; }
   .nav-links a:not(.btn-primary) { display: none; }
 }

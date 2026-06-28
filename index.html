@@ -15,8 +15,8 @@
       <span><strong>빔이랑</strong><em>BIMelang</em></span>
     </a>
     <div class="nav-links">
-      <a href="#problem">문제인식</a>
       <a href="#solution">솔루션</a>
+      <a href="#cad">CAD→BIM</a>
       <a href="#roadmap">로드맵</a>
       <a class="btn-primary" href="editor.html">에디터 열기 →</a>
     </div>
@@ -91,8 +91,34 @@
     </div>
   </section>
 
+  <!-- CAD → BIM Add-in -->
+  <section id="cad" class="section">
+    <span class="kicker">CAD-TO-BIM Add-in</span>
+    <h2>2D 도면을 객체지향 BIM으로 자동 변환</h2>
+    <p class="section-lead">
+      Revit·ArchiCAD는 비싸고 다룰 인력도 적습니다. 대부분의 설계사무소가 가진 CAD 도면을
+      업로드하면, 레이어를 인식해 <b>기둥·벽·바닥·지붕</b>을 객체별로 생성하고 IFC로 내보냅니다.
+    </p>
+    <div class="cad-flow">
+      <div class="cad-step"><span class="n">1</span><b>DXF 업로드</b><p>CAD 도면을 그대로 올립니다.</p></div>
+      <div class="cad-arrow">→</div>
+      <div class="cad-step"><span class="n">2</span><b>레이어 매핑</b><p>레이어→객체 타입 자동 추정·확인.</p></div>
+      <div class="cad-arrow">→</div>
+      <div class="cad-step"><span class="n">3</span><b>BIM 생성</b><p>객체별 3D 모델로 변환.</p></div>
+      <div class="cad-arrow">→</div>
+      <div class="cad-step"><span class="n">4</span><b>IFC 내보내기</b><p>Revit·ArchiCAD에서 열람.</p></div>
+    </div>
+    <div class="cta-band" style="margin-top:32px;">
+      <div>
+        <h3>도면을 BIM으로 바꿔보세요</h3>
+        <p>에디터에서 "CAD 가져오기(DXF)"로 즉시 변환할 수 있습니다. (샘플: <code>samples/plan.dxf</code>)</p>
+      </div>
+      <a class="btn-primary lg" href="editor.html">CAD 변환 열기 →</a>
+    </div>
+  </section>
+
   <!-- 서비스 개요 -->
-  <section class="section">
+  <section class="section alt">
     <span class="kicker">서비스 개요</span>
     <h2>빔이랑 한눈에 보기</h2>
     <div class="spec">
@@ -103,7 +129,7 @@
   </section>
 
   <!-- 로드맵 -->
-  <section id="roadmap" class="section alt">
+  <section id="roadmap" class="section">
     <span class="kicker">개발 로드맵</span>
     <h2>단계별 제품 진화</h2>
     <ol class="roadmap">
@@ -112,6 +138,13 @@
         <div>
           <h3>업로드·편집·다운로드 <span class="pill">MVP 구현됨</span></h3>
           <p>웹에서 건축 설계 모델을 업로드/다운로드하고, 3D로 가공·편집합니다.</p>
+        </div>
+      </li>
+      <li class="done">
+        <span class="step">+</span>
+        <div>
+          <h3>CAD-TO-BIM Add-in <span class="pill">MVP 구현됨</span></h3>
+          <p>DXF 도면을 객체별(기둥·벽·바닥·지붕) BIM으로 자동 변환합니다.</p>
         </div>
       </li>
       <li>
@@ -132,17 +165,17 @@
   </section>
 
   <!-- MVP 기능 -->
-  <section class="section">
+  <section class="section alt">
     <span class="kicker">프로토타입 (MVP)</span>
     <h2>지금 바로 동작하는 기능</h2>
-    <p class="section-lead">회사와 진행 여부를 논의하기 위한 최소 동작 데모입니다. 로드맵 1단계에 집중했습니다.</p>
+    <p class="section-lead">회사와 진행 여부를 논의하기 위한 최소 동작 데모입니다.</p>
     <div class="features">
       <div class="feat"><b>3D 뷰포트</b><span>회전·줌·이동, WebGL 가속</span></div>
-      <div class="feat"><b>업로드 / 다운로드</b><span>JSON으로 불러오기·저장</span></div>
-      <div class="feat"><b>요소 편집</b><span>벽·슬래브 선택·이동·크기·회전</span></div>
+      <div class="feat"><b>CAD(DXF) 가져오기</b><span>도면 → 객체별 BIM 자동 변환</span></div>
+      <div class="feat"><b>요소 편집</b><span>벽·기둥·슬래브 선택·이동·크기·회전</span></div>
       <div class="feat"><b>방향키 이동</b><span>동서남북 + 상하(EL)</span></div>
-      <div class="feat"><b>IFC 내보내기</b><span>건축 SW 호환 산출물</span></div>
-      <div class="feat"><b>속성 패널</b><span>좌표·높이·두께 정밀 입력</span></div>
+      <div class="feat"><b>IFC 내보내기</b><span>Revit·ArchiCAD 호환 산출물</span></div>
+      <div class="feat"><b>업로드 / 다운로드</b><span>JSON 저장·불러오기</span></div>
     </div>
     <div class="cta-band">
       <div>

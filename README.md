@@ -22,8 +22,9 @@
 
 ### 구현된 기능
 - **3D 뷰포트**: 브라우저에서 WebGL(Three.js) 하드웨어 가속으로 건물 모델 표시 (회전/줌/이동)
+- **CAD-TO-BIM (DXF→BIM)**: DXF 도면 업로드 → 레이어를 객체 타입(기둥·벽·바닥·지붕)으로 자동 매핑 → BIM 변환. 자세히는 [docs/CAD_TO_BIM.md](docs/CAD_TO_BIM.md)
 - **업로드 / 다운로드**: 건축 설계 데이터를 JSON으로 불러오고 저장
-- **편집**: 요소(벽·슬래브) 클릭 선택 → 속성(좌표·높이·두께·EL) 실시간 수정, 추가/삭제
+- **편집**: 요소(벽·기둥·슬래브) 클릭 선택 → 속성(좌표·크기·EL) 실시간 수정, 이동/크기/회전, 추가/삭제
 - **IFC 내보내기**: 건축 SW에서 열 수 있는 `.ifc`(IFC4) 산출물 생성
 
 ### 실행 방법
@@ -31,8 +32,8 @@
 npm start          # node server.js — 의존성 설치 불필요
 ```
 - 랜딩 페이지: http://localhost:5173/ (서비스 소개)
-- 에디터: http://localhost:5173/editor → "샘플 불러오기"로 즉시 데모
-- 샘플 데이터: `samples/house.json`
+- 에디터: http://localhost:5173/editor → "샘플 불러오기" 또는 "CAD 가져오기(DXF)"로 즉시 데모
+- 샘플 데이터: `samples/house.json` (BIM JSON), `samples/plan.dxf` (CAD 도면)
 
 ### 구조
 | 파일 | 역할 |
@@ -42,6 +43,8 @@ npm start          # node server.js — 의존성 설치 불필요
 | `js/model.js` | 건축 데이터 모델(JSON 스키마) · 샘플 |
 | `js/scene.js` | Three.js 3D 렌더링 · 선택(raycast) · 변형 기즈모 |
 | `js/transform.js` | 이동·크기·회전 변형 계산(순수 함수) |
+| `js/dxf.js` | DXF 도면 파서 |
+| `js/cadToBim.js` | CAD → BIM 변환(레이어 매핑·객체 생성) |
 | `js/ifc.js` | IFC4 내보내기 |
 | `js/app.js` | 상태 관리 · 액션 연결 |
 | `server.js` | 의존성 없는 정적 서버 (`/editor` 라우팅 포함) |
@@ -51,13 +54,15 @@ npm start          # node server.js — 의존성 설치 불필요
 {
   "project": { "name": "...", "units": "mm" },
   "elements": [
-    { "type": "wall", "start": [x,y], "end": [x,y], "height": 3000, "thickness": 200, "elevation": 0 },
-    { "type": "slab", "polygon": [[x,y],...], "thickness": 250, "elevation": 0 }
+    { "type": "wall",   "start": [x,y], "end": [x,y], "height": 3000, "thickness": 200, "elevation": 0 },
+    { "type": "slab",   "polygon": [[x,y],...], "thickness": 250, "elevation": 0 },
+    { "type": "column", "position": [x,y], "width": 400, "depth": 400, "height": 3000, "elevation": 0 }
   ]
 }
 ```
 
 ### 이번 MVP에서 의도적으로 제외한 것 (논의 후 결정)
 - 생성형 AI 연결(로드맵 2단계), 다중 모델 연결(3단계)
+- DWG·PDF 도면 변환 (현재 DXF만 지원), 곡선(ARC/스플라인) 인식, 블록(INSERT) 전개
 - 정밀 IFC 형상(개구부/관계), 슬래브 비사각형 외곽 렌더링
 - 사용자 인증·서버 저장·협업

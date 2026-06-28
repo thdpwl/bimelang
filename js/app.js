@@ -1,12 +1,14 @@
 import { Viewer } from "./scene.js";
 import { exportIFC } from "./ifc.js";
 import {
-  emptyModel, sampleModel, createWall, createSlab,
+  emptyModel, sampleModel, createWall, createSlab, createColumn,
   validateModel, syncSeq,
 } from "./model.js";
 import {
-  decomposeWall, decomposeSlab, translateElement, slabCentroid, DIRECTIONS,
+  decomposeWall, decomposeSlab, decomposeColumn, translateElement, slabCentroid, DIRECTIONS,
 } from "./transform.js";
+import { parseDXF, unitsToScale } from "./dxf.js";
+import { guessType, defaultOptions, convert, preview, TYPES, TYPE_LABEL } from "./cadToBim.js";
 
 // ---- 상태 ----
 let model = sampleModel();
@@ -76,6 +78,12 @@ function renderInspector() {
       pair(numField("thickness", "두께", el.thickness), numField("elevation", "기준 높이(EL)", el.elevation)),
       `<p class="hint">가로·세로 변경 시 직사각형으로 재생성됩니다.</p>`,
     );
+  } else if (el.type === "column") {
+    rows.push(
+      pair(numField("pos0", "위치 X", el.position[0]), numField("pos1", "위치 Y", el.position[1])),
+      pair(numField("width", "단면 가로", el.width), numField("depth", "단면 세로", el.depth)),
+      pair(numField("height", "높이", el.height), numField("elevation", "기준 높이(EL)", el.elevation)),
+    );
   }
   box.innerHTML = rows.join("");
 
@@ -93,8 +101,10 @@ function applyField(el, inp) {
     case "start1": el.start[1] = val; break;
     case "end0": el.end[0] = val; break;
     case "end1": el.end[1] = val; break;
-    case "width": resizeSlab(el, val, null); break;
-    case "depth": resizeSlab(el, null, val); break;
+    case "pos0": el.position[0] = val; break;
+    case "pos1": el.position[1] = val; break;
+    case "width": el.type === "slab" ? resizeSlab(el, val, null) : (el.width = val); break;
+    case "depth": el.type === "slab" ? resizeSlab(el, null, val) : (el.depth = val); break;
     default: el[key] = val;
   }
   refresh();
@@ -130,6 +140,10 @@ function onTransform(mesh) {
       localMM: mesh.userData.localMM, baseThickness: mesh.userData.baseThickness,
     });
     el.polygon = r.polygon; el.thickness = r.thickness; el.elevation = r.elevation;
+  } else if (el.type === "column") {
+    Object.assign(el, decomposeColumn({
+      pos: mesh.position, scale: mesh.scale, geomParams: mesh.geometry.parameters,
+    }));
   }
   status(`${el.name || el.id} ${{ translate: "이동", scale: "크기", rotate: "회전" }[mode]} 중…`);
 }
@@ -200,6 +214,102 @@ $("btn-add-slab").addEventListener("click", () => {
   refresh();
   select(el.id);
   status("슬래브를 추가했습니다.");
+});
+
+$("btn-add-column").addEventListener("click", () => {
+  const el = createColumn();
+  model.elements.push(el);
+  refresh();
+  select(el.id);
+  status("기둥을 추가했습니다.");
+});
+
+// ---- CAD(DXF) → BIM 변환 ----
+let cadPrimitives = null;
+let cadLayers = null;
+
+$("cad-input").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const { primitives, layers, insunits } = parseDXF(text);
+    if (!primitives.length) throw new Error("인식 가능한 도형(LINE/POLYLINE/CIRCLE)이 없습니다.");
+    cadPrimitives = primitives;
+    cadLayers = layers;
+    openCadModal(layers, insunits, file.name);
+  } catch (err) {
+    status(`DXF 불러오기 실패: ${err.message}`);
+    alert(`DXF 불러오기 실패: ${err.message}`);
+  }
+  e.target.value = "";
+});
+
+function openCadModal(layers, insunits, filename) {
+  cadFileName = filename;
+  const scale = unitsToScale(insunits);
+  const o = defaultOptions(scale);
+  // 옵션 기본값 채우기
+  for (const [k, v] of Object.entries(o)) {
+    const inp = document.getElementById(`opt-${k}`);
+    if (inp) inp.value = v;
+  }
+  $("cad-summary").textContent =
+    `${filename} · 레이어 ${Object.keys(layers).length}개 · 도형 ${cadPrimitives.length}개`
+    + (insunits ? ` · 단위 자동감지(×${scale})` : " · 단위 미지정(mm 가정)");
+
+  // 레이어 매핑 행 생성
+  const tbody = $("cad-layers");
+  tbody.innerHTML = "";
+  for (const [name, count] of Object.entries(layers)) {
+    const tr = document.createElement("tr");
+    const guessed = guessType(name);
+    const opts = TYPES.map((t) =>
+      `<option value="${t}" ${t === guessed ? "selected" : ""}>${TYPE_LABEL[t]}</option>`).join("");
+    tr.innerHTML = `<td>${escapeHtml(name)}</td><td>${count}</td>
+      <td><select data-layer="${escapeAttr(name)}">${opts}</select></td>`;
+    tbody.appendChild(tr);
+  }
+  tbody.querySelectorAll("select").forEach((s) => s.addEventListener("change", updateCadPreview));
+  updateCadPreview();
+  $("cad-modal").hidden = false;
+}
+
+function currentMapping() {
+  const map = {};
+  $("cad-layers").querySelectorAll("select").forEach((s) => { map[s.dataset.layer] = s.value; });
+  return map;
+}
+function currentOptions() {
+  const o = {};
+  for (const k of ["scale", "wallHeight", "wallThickness", "columnHeight", "slabThickness", "roofThickness", "roofElevation"]) {
+    const inp = document.getElementById(`opt-${k}`);
+    o[k] = inp ? parseFloat(inp.value) : 0;
+  }
+  if (!o.roofThickness) o.roofThickness = o.slabThickness; // 입력칸 없는 항목 보정
+  return o;
+}
+function updateCadPreview() {
+  const c = preview(cadPrimitives, currentMapping());
+  $("cad-preview").textContent = `예상 생성: 벽 ${c.wall} · 기둥 ${c.column} · 바닥 ${c.slab} · 지붕 ${c.roof}`;
+}
+
+let cadFileName = "도면";
+function closeCadModal() { $("cad-modal").hidden = true; }
+$("cad-cancel").addEventListener("click", closeCadModal);
+$("cad-cancel2").addEventListener("click", closeCadModal);
+
+$("cad-convert").addEventListener("click", () => {
+  const els = convert(cadPrimitives, currentMapping(), currentOptions());
+  if (!els.length) { alert("변환된 요소가 없습니다. 레이어 매핑을 확인하세요."); return; }
+  const name = cadFileName.replace(/\.dxf$/i, "");
+  model = { project: { name, units: "mm" }, elements: els };
+  syncSeq(model);
+  selectedId = null;
+  closeCadModal();
+  refresh();
+  viewer.fitView(model);
+  status(`CAD 변환 완료 · ${els.length}개 요소 생성 (${name})`);
 });
 
 $("btn-delete").addEventListener("click", deleteSelected);

@@ -71,6 +71,15 @@ function solidVertices(el) {
       [minX, minY, z1], [maxX, minY, z1], [maxX, maxY, z1], [minX, maxY, z1],
     ];
   }
+  if (el.type === "column") {
+    const [cx, cy] = el.position;
+    const hw = el.width / 2, hd = el.depth / 2;
+    const z0 = el.elevation || 0, z1 = z0 + el.height;
+    return [
+      [cx - hw, cy - hd, z0], [cx + hw, cy - hd, z0], [cx + hw, cy + hd, z0], [cx - hw, cy + hd, z0],
+      [cx - hw, cy - hd, z1], [cx + hw, cy - hd, z1], [cx + hw, cy + hd, z1], [cx - hw, cy + hd, z1],
+    ];
+  }
   return null;
 }
 

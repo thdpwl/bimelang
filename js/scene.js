@@ -9,6 +9,7 @@ const S = 0.001;
 const COLORS = {
   wall: 0xb9c4d0,
   slab: 0x8f9bab,
+  column: 0xc9a36a,
   selected: 0x4c8dff,
 };
 
@@ -185,7 +186,16 @@ export class Viewer {
   _buildMesh(el) {
     if (el.type === "wall") return this._buildWall(el);
     if (el.type === "slab") return this._buildSlab(el);
+    if (el.type === "column") return this._buildColumn(el);
     return null;
+  }
+
+  _buildColumn(el) {
+    const geom = new THREE.BoxGeometry(el.width * S, el.height * S, el.depth * S);
+    const mesh = new THREE.Mesh(geom, this._material("column"));
+    mesh.position.set(el.position[0] * S, ((el.elevation || 0) + el.height / 2) * S, el.position[1] * S);
+    this._finish(mesh, "column");
+    return mesh;
   }
 
   _buildWall(el) {
