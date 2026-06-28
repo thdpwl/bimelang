@@ -1,0 +1,11 @@
+{
+  "project": { "name": "예시 파빌리온", "units": "mm" },
+  "elements": [
+    { "id": "s1", "type": "slab", "name": "바닥", "polygon": [[0,0],[6000,0],[6000,6000],[0,6000]], "thickness": 300, "elevation": 0 },
+    { "id": "c1", "type": "column", "name": "기둥 SW", "position": [500,500], "width": 400, "depth": 400, "height": 3500, "elevation": 0 },
+    { "id": "c2", "type": "column", "name": "기둥 SE", "position": [5500,500], "width": 400, "depth": 400, "height": 3500, "elevation": 0 },
+    { "id": "c3", "type": "column", "name": "기둥 NE", "position": [5500,5500], "width": 400, "depth": 400, "height": 3500, "elevation": 0 },
+    { "id": "c4", "type": "column", "name": "기둥 NW", "position": [500,5500], "width": 400, "depth": 400, "height": 3500, "elevation": 0 },
+    { "id": "s2", "type": "slab", "name": "지붕", "polygon": [[-500,-500],[6500,-500],[6500,6500],[-500,6500]], "thickness": 350, "elevation": 3500 }
+  ]
+}
