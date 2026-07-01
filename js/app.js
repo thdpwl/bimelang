@@ -9,6 +9,7 @@ import {
 } from "./transform.js";
 import { parseDXF, unitsToScale } from "./dxf.js";
 import { guessType, defaultOptions, convert, preview, TYPES, TYPE_LABEL } from "./cadToBim.js";
+import { extractHeightProfile } from "./heightProfile.js";
 
 // ---- 상태 ----
 let model = sampleModel();
@@ -227,6 +228,7 @@ $("btn-add-column").addEventListener("click", () => {
 // ---- CAD(DXF) → BIM 변환 ----
 let cadPrimitives = null;
 let cadLayers = null;
+let cadProfile = null; // 단면도/입면도에서 산정한 높이 프로파일 { levels, roof, top, ... }
 
 $("cad-input").addEventListener("change", async (e) => {
   const file = e.target.files[0];
@@ -247,6 +249,12 @@ $("cad-input").addEventListener("change", async (e) => {
 
 function openCadModal(layers, insunits, filename) {
   cadFileName = filename;
+  cadProfile = null; // 새 평면도 열 때 이전 높이 산정 초기화
+  const secSummary = $("section-summary");
+  if (secSummary) secSummary.textContent =
+    "단면도 또는 입면도(DXF)를 넣으면 층 높이·지붕 높이를 자동으로 채웁니다. 값은 아래에서 수정할 수 있습니다.";
+  const autoChk = $("opt-autoFloors");
+  if (autoChk) autoChk.checked = true;
   const scale = unitsToScale(insunits);
   const o = defaultOptions(scale);
   // 옵션 기본값 채우기
@@ -290,8 +298,50 @@ function currentOptions() {
   }
   o.pairWalls = document.getElementById("opt-pairWalls")?.checked ?? true;
   if (!o.roofThickness) o.roofThickness = o.slabThickness; // 입력칸 없는 항목 보정
+  // 단면도/입면도에서 산정한 층 레벨 기반 자동 바닥·지붕
+  o.autoFloors = document.getElementById("opt-autoFloors")?.checked ?? true;
+  o.floorLevels = (o.autoFloors && cadProfile) ? cadProfile.levels : null;
   return o;
 }
+
+// 단면도/입면도 DXF → 높이 자동 산정 → 높이 입력칸 채움(수정 가능)
+$("section-input").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const { primitives, insunits } = parseDXF(text);
+    if (!primitives.length) throw new Error("인식 가능한 도형이 없습니다.");
+    const scale = unitsToScale(insunits);
+    const prof = extractHeightProfile(primitives, scale);
+    if (!prof) throw new Error("높이(수평 레벨) 정보를 찾지 못했습니다.");
+    cadProfile = prof;
+    const H = prof.roof || prof.top;
+    setOpt("wallHeight", H);
+    setOpt("columnHeight", H);
+    setOpt("roofElevation", prof.roof || prof.top);
+    $("section-summary").textContent =
+      `높이 자동 산정 · 레벨 [${prof.levels.join(", ")}]mm · 지붕 ${prof.roof}mm · 전체높이 ${prof.totalHeight}mm`
+      + ` · 대표 층고 ${prof.floorHeight}mm (값은 아래·요소속성에서 수정 가능)`;
+    const autoChk = $("opt-autoFloors");
+    if (autoChk) autoChk.checked = true;
+    updateCadPreview();
+    status(`단면도/입면도에서 높이 산정 완료 · 레벨 ${prof.levels.length}개`);
+  } catch (err) {
+    status(`단면도/입면도 처리 실패: ${err.message}`);
+    alert(`단면도/입면도 처리 실패: ${err.message}`);
+  }
+  e.target.value = "";
+});
+
+// 옵션 입력칸 값 채우기
+function setOpt(key, value) {
+  const inp = document.getElementById(`opt-${key}`);
+  if (inp) inp.value = Math.round(value);
+}
+
+// 자동 바닥·지붕 토글 시 미리보기 갱신
+$("opt-autoFloors")?.addEventListener("change", updateCadPreview);
 function updateCadPreview() {
   const c = preview(cadPrimitives, currentMapping(), currentOptions());
   $("cad-preview").textContent = `예상 생성: 벽 ${c.wall} · 기둥 ${c.column} · 바닥 ${c.slab} · 지붕 ${c.roof}`;
