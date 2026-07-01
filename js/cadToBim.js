@@ -27,6 +27,9 @@ export function defaultOptions(scale = 1) {
     slabThickness: 250,
     roofThickness: 250,
     roofElevation: 3000,
+    // 단면도·입면도에서 산정한 층 레벨로 바닥·지붕 자동 생성.
+    autoFloors: true,      // 레벨별 바닥/지붕 자동 생성 on/off
+    floorLevels: null,     // [0, 3000, ...] 층 레벨(mm). 단면도/입면도 없으면 null → 자동 생성 안 함.
   };
 }
 
@@ -35,12 +38,15 @@ export function convert(primitives, mapping, options) {
   const s = o.scale;
   const sp = ([x, y]) => [x * s, y * s];
   const out = [];
+  const wallPts = []; // 자동 바닥·지붕 외곽 산정용(mm 좌표)
 
   // 벽: 전체 선을 모아 평행 2선 → 두께 있는 벽 1개로 병합 후 생성
   for (const job of buildWallJobs(primitives, mapping, o)) {
+    const start = sp(job.start), end = sp(job.end);
+    wallPts.push(start, end);
     out.push(createWall({
       name: `벽 (${job.layer})`,
-      start: sp(job.start), end: sp(job.end),
+      start, end,
       height: o.wallHeight,
       // 짝지어진 벽은 도면에서 측정한 두께, 단일선은 기본 두께
       thickness: job.paired ? Math.max(1, Math.round(job.thicknessDU * s)) : o.wallThickness,
@@ -73,7 +79,61 @@ export function convert(primitives, mapping, options) {
       }
     }
   }
+
+  // 단면도·입면도에서 산정한 층 레벨로 바닥·지붕 자동 생성.
+  // 외곽(footprint)은 벽 중심선의 bbox → 없으면 전체 도형 bbox.
+  if (o.autoFloors && Array.isArray(o.floorLevels) && o.floorLevels.length) {
+    const footprint = footprintFromPoints(wallPts) || allPointsFootprint(primitives, sp);
+    if (footprint) {
+      for (const item of levelSlabs(o.floorLevels, o)) {
+        out.push(createSlab({
+          name: item.name,
+          polygon: footprint,
+          thickness: item.thickness,
+          elevation: item.elevation,
+        }));
+      }
+    }
+  }
   return out;
+}
+
+// 층 레벨 배열 → 생성할 바닥/지붕 목록. 최상단 레벨은 지붕으로 본다.
+function levelSlabs(levels, o) {
+  const sorted = [...levels].sort((a, b) => a - b);
+  const items = [];
+  sorted.forEach((elev, i) => {
+    const isRoof = sorted.length > 1 && i === sorted.length - 1;
+    items.push({
+      name: isRoof ? "지붕 (자동)" : `바닥 ${i + 1}층 (자동)`,
+      thickness: isRoof ? o.roofThickness : o.slabThickness,
+      elevation: elev,
+    });
+  });
+  return items;
+}
+
+// 점들의 축정렬 bbox → 직사각형 footprint. 너무 작으면 null.
+function footprintFromPoints(pts) {
+  if (!pts || pts.length < 2) return null;
+  const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  if (maxX - minX < 1 || maxY - minY < 1) return null;
+  return [[minX, minY], [maxX, minY], [maxX, maxY], [minX, maxY]];
+}
+
+// 벽이 없을 때: 전체 도형의 bbox를 footprint로.
+function allPointsFootprint(primitives, sp) {
+  const pts = [];
+  for (const p of primitives) {
+    if (p.points) for (const q of p.points) pts.push(sp(q));
+    else if (p.kind === "circle") {
+      pts.push(sp([p.center[0] - p.radius, p.center[1] - p.radius]));
+      pts.push(sp([p.center[0] + p.radius, p.center[1] + p.radius]));
+    }
+  }
+  return footprintFromPoints(pts);
 }
 
 // 변환 결과 요약 (미리보기용)
@@ -86,6 +146,12 @@ export function preview(primitives, mapping, options) {
     if (t === "column") { if (columnFrom(p)) c.column++; }
     else if (t === "slab") { if (p.kind === "polyline" && p.points.length >= 3) c.slab++; }
     else if (t === "roof") { if (p.kind === "polyline" && p.points.length >= 3) c.roof++; }
+  }
+  // 단면도·입면도 기반 자동 바닥·지붕
+  if (o.autoFloors && Array.isArray(o.floorLevels) && o.floorLevels.length) {
+    const n = o.floorLevels.length;
+    if (n > 1) { c.slab += n - 1; c.roof += 1; }
+    else c.slab += 1;
   }
   return c;
 }
