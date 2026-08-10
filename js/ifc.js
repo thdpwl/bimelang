@@ -100,6 +100,7 @@ export function exportIFC(model) {
 
   // --- 요소 ---
   const productRefs = [];
+  const wallRefs = []; // 벽 결합(join) 관계 산출용 [{ el, ref }]
   for (const el of model.elements) {
     // 문·창: 패밀리(타입) 인스턴스로 배치 (형상은 타입에서 매핑)
     if (el.type === "door" || el.type === "window") {
@@ -164,11 +165,18 @@ export function exportIFC(model) {
       ref = add(`IFCBUILDINGELEMENTPROXY('${g}',${owner},'${nm}',$,$,${elPl},${prodShape},'${tag}',$);`);
     }
     productRefs.push(ref);
+    if (el.type === "wall") wallRefs.push({ el, ref });
   }
 
   // 문·창 인스턴스를 각자의 패밀리(타입)에 연결 (IfcRelDefinesByType) → 나중에 타입 교체 가능
   for (const { typeRef, insts } of typeInstances.values()) {
     add(`IFCRELDEFINESBYTYPE('${gid()}',${owner},$,$,(${insts.join(",")}),${typeRef});`);
+  }
+
+  // 벽 결합(join): 도면에서 이어지는 벽을 IfcRelConnectsPathElements로 접합.
+  // 두 벽이 접합점을 공유하면 각 벽 기준 위치(ATSTART/ATEND/ATPATH)를 기록한다.
+  for (const rel of wallJoinRels(wallRefs)) {
+    add(`IFCRELCONNECTSPATHELEMENTS('${gid()}',${owner},$,$,$,${rel.a},${rel.b},(0),(0),${rel.ca},${rel.cb});`);
   }
 
   // 요소를 층에 공간적으로 포함
@@ -248,6 +256,45 @@ function footprint(el) {
   }
   // 문·창은 exportIFC에서 패밀리(타입) 인스턴스로 별도 처리한다.
   return null;
+}
+
+// 벽 결합(join) 관계 산출: 접합점을 공유하는 벽 쌍을 찾아
+// 각 벽 기준 접합 위치(ATSTART/ATEND/ATPATH)를 매긴다.
+// 반환: [{ a, b, ca, cb }]  (a,b=벽 참조 #n, ca/cb=IfcConnectionTypeEnum)
+function wallJoinRels(wallRefs) {
+  const TOL = 1; // mm, 접합점 일치 허용
+  // 점 p가 벽 el의 어디에 닿는지 → 접합 타입 문자열 or null
+  const connType = (el, p) => {
+    const near = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]) <= TOL;
+    if (near(p, el.start)) return ".ATSTART.";
+    if (near(p, el.end)) return ".ATEND.";
+    const dx = el.end[0] - el.start[0], dy = el.end[1] - el.start[1];
+    const L = Math.hypot(dx, dy) || 1;
+    const ux = dx / L, uy = dy / L;
+    const t = (p[0] - el.start[0]) * ux + (p[1] - el.start[1]) * uy;      // 축 방향 위치
+    const perp = Math.abs((p[0] - el.start[0]) * -uy + (p[1] - el.start[1]) * ux); // 축선까지 수직거리
+    if (perp <= TOL && t > TOL && t < L - TOL) return ".ATPATH.";         // 축선 중간(T교차)
+    return null;
+  };
+  const rels = [];
+  for (let i = 0; i < wallRefs.length; i++) {
+    for (let j = i + 1; j < wallRefs.length; j++) {
+      const A = wallRefs[i], B = wallRefs[j];
+      let pt = null, ca = null, cb = null;
+      // A의 끝점이 B에 닿는가
+      for (const p of [A.el.start, A.el.end]) {
+        const t = connType(B.el, p);
+        if (t) { pt = p; cb = t; ca = connType(A.el, p); break; }
+      }
+      // 아니면 B의 끝점이 A의 축선(T)에 닿는가
+      if (!pt) for (const p of [B.el.start, B.el.end]) {
+        const t = connType(A.el, p);
+        if (t) { pt = p; ca = t; cb = connType(B.el, p); break; }
+      }
+      if (pt && ca && cb) rels.push({ a: A.ref, b: B.ref, ca, cb });
+    }
+  }
+  return rels;
 }
 
 // IFC GlobalId: 128비트를 22자 IFC base64로 인코딩.

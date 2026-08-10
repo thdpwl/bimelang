@@ -25,6 +25,7 @@ export function defaultOptions(scale = 1) {
     pairWalls: true,       // 벽 양면선(평행 2선)을 두께 있는 벽 1개로 병합
     wallPairMaxGap: 400,   // 두 선 사이 최대 거리(mm). 이보다 멀면 별개의 벽으로 본다.
     wallJoinGap: 1000,     // 같은 직선 위 벽 조각을 이을 최대 틈(mm). 문·기둥으로 끊긴 벽을 연결.
+    openingMaxWidth: 3000, // 창·문 개구부로 끊긴 같은 직선 벽을 이을 최대 개구부 폭(mm).
     columnHeight: 3000,
     // 문·창: 평면도엔 높이 정보가 없으므로 사용자가 조절하는 기본값.
     doorHeight: 2100,      // 문 높이
@@ -49,16 +50,19 @@ export function convert(primitives, mapping, options) {
 
   // 기둥 footprint(도면 단위) — 벽에서 기둥 구간을 잘라내는 데 쓴다.
   const columnBoxes = collectColumnBoxes(primitives, mapping);
+  // 개구부(문·창) 박스(도면 단위) — 벽 잇기(개구부 위치)와 벽 호스팅에 함께 쓴다.
+  const doorBoxes = openingBoxes(primitives, mapping, "door", o);
+  const winBoxes = openingBoxes(primitives, mapping, "window", o);
+  const openingCentersDU = [...doorBoxes, ...winBoxes].map((b) => b.center);
 
   // 벽: 전체 선을 모아 평행 2선 → 두께 있는 벽 1개로 병합,
   // 그다음 기둥과 겹치는 구간을 잘라내 조각으로 나눠 생성한다(벽·기둥 중복 방지).
-  for (const job of buildWallJobs(primitives, mapping, o)) {
+  const wallEls = [];
+  for (const job of buildWallJobs(primitives, mapping, o, openingCentersDU)) {
     for (const piece of subtractColumns(job, columnBoxes, o)) {
-      const start = sp(piece.start), end = sp(piece.end);
-      wallPts.push(start, end);
-      out.push(createWall({
+      wallEls.push(createWall({
         name: `벽 (${piece.layer})`,
-        start, end,
+        start: sp(piece.start), end: sp(piece.end),
         height: o.wallHeight,
         // 짝지어진 벽은 도면에서 측정한 두께, 단일선은 기본 두께
         thickness: piece.paired ? Math.max(1, Math.round(piece.thicknessDU * s)) : o.wallThickness,
@@ -66,6 +70,10 @@ export function convert(primitives, mapping, options) {
       }));
     }
   }
+  // 접합: 도면에서 이어지는 벽이 모델에서 벌어지지 않도록 모서리·T교차부에서
+  // 벽 끝을 만나는 지점까지 연장한다(공백 제거). 실제 결합 관계는 IFC에서 표현.
+  weldJunctions(wallEls, o);
+  for (const w of wallEls) { wallPts.push(w.start, w.end); out.push(w); }
 
   for (const p of primitives) {
     const t = mapping[p.layer] || "ignore";
@@ -93,13 +101,10 @@ export function convert(primitives, mapping, options) {
     }
   }
 
-  // 문·창: 벽을 다 만든 뒤(위) 도면의 문·창 박스를 감지해 가장 가까운 벽에 호스팅한다.
+  // 문·창: 벽을 다 만든 뒤(위) 감지한 문·창 박스를 가장 가까운 벽에 호스팅한다.
   const walls = out.filter((e) => e.type === "wall");
-  for (const type of ["door", "window"]) {
-    for (const box of openingBoxes(primitives, mapping, type, o)) {
-      out.push(makeOpening(type, box, walls, o, sp));
-    }
-  }
+  for (const box of doorBoxes) out.push(makeOpening("door", box, walls, o, sp));
+  for (const box of winBoxes) out.push(makeOpening("window", box, walls, o, sp));
 
   // 단면도·입면도에서 산정한 층 레벨로 바닥·지붕 자동 생성.
   // 외곽(footprint)은 벽 중심선의 bbox → 없으면 전체 도형 bbox.
@@ -162,11 +167,14 @@ export function preview(primitives, mapping, options) {
   const o = options || defaultOptions();
   const c = { wall: 0, column: 0, door: 0, window: 0, slab: 0, roof: 0 };
   const columnBoxes = collectColumnBoxes(primitives, mapping);
-  for (const job of buildWallJobs(primitives, mapping, o)) {
+  const doorBoxes = openingBoxes(primitives, mapping, "door", o);
+  const winBoxes = openingBoxes(primitives, mapping, "window", o);
+  const openingCentersDU = [...doorBoxes, ...winBoxes].map((b) => b.center);
+  for (const job of buildWallJobs(primitives, mapping, o, openingCentersDU)) {
     c.wall += subtractColumns(job, columnBoxes, o).length;
   }
-  c.door = openingBoxes(primitives, mapping, "door", o).length;
-  c.window = openingBoxes(primitives, mapping, "window", o).length;
+  c.door = doorBoxes.length;
+  c.window = winBoxes.length;
   for (const p of primitives) {
     const t = mapping[p.layer] || "ignore";
     if (t === "column") { if (columnFrom(p)) c.column++; }
@@ -188,7 +196,7 @@ export function preview(primitives, mapping, options) {
 // 반환: [{ start:[x,y], end:[x,y], layer, paired, thicknessDU }]
 //   - paired=true 면 thicknessDU(도면 단위 두께)가 채워짐
 //   - paired=false 면 짝 없는 단일선 (기본 두께로 생성)
-function buildWallJobs(primitives, mapping, o) {
+function buildWallJobs(primitives, mapping, o, openingCentersDU = []) {
   const segs = [];
   for (const p of primitives) {
     if ((mapping[p.layer] || "ignore") !== "wall") continue;
@@ -201,13 +209,15 @@ function buildWallJobs(primitives, mapping, o) {
     return segs.map((g) => ({ start: g.a, end: g.b, layer: g.layer, paired: false }));
   }
   // 평행쌍 → 두께 벽, 그 다음 같은 직선 위 끊긴 조각들을 하나로 잇는다.
-  return mergeCollinearWalls(pairWallSegments(segs, o), o);
+  return mergeCollinearWalls(pairWallSegments(segs, o), o, openingCentersDU);
 }
 
 // 같은 직선 위에서 문·기둥으로 끊긴 벽 조각들을 하나의 벽으로 잇는다.
-function mergeCollinearWalls(jobs, o) {
+// openingCentersDU: 창·문 개구부 중심(도면 단위). 개구부로 끊긴 넓은 틈도 잇는다.
+function mergeCollinearWalls(jobs, o, openingCentersDU = []) {
   const scale = o.scale || 1;
   const joinGap = (o.wallJoinGap ?? 1000) / scale;
+  const openMax = (o.openingMaxWidth ?? 3000) / scale;   // 개구부로 끊긴 벽을 이을 최대 틈
   const offTol = 30 / scale;   // 같은 직선으로 볼 수직거리 오차(≈30mm)
 
   const groups = new Map();
@@ -231,6 +241,14 @@ function mergeCollinearWalls(jobs, o) {
       return { lo: Math.min(t0, t1), hi: Math.max(t0, t1), thicknessDU: j.thicknessDU || 0, paired: j.paired, layer: j.layer };
     }).sort((a, b) => a.lo - b.lo);
 
+    // 이 직선 위(수직거리 offTol 이내)에 놓인 개구부 중심의 투영 위치 t
+    const openTs = [];
+    for (const c of openingCentersDU) {
+      if (Math.abs(cross(dir, sub(c, o0))) > offTol) continue; // 다른 직선의 개구부
+      openTs.push(dot(sub(c, o0), dir));
+    }
+    const gapHasOpening = (lo, hi) => openTs.some((t) => t > lo && t < hi);
+
     let cur = { ...items[0] };
     const flush = () => out.push({
       start: add(o0, mul(dir, cur.lo)), end: add(o0, mul(dir, cur.hi)),
@@ -238,7 +256,9 @@ function mergeCollinearWalls(jobs, o) {
     });
     for (let k = 1; k < items.length; k++) {
       const it = items[k];
-      if (it.lo - cur.hi <= joinGap) {                 // 틈이 joinGap 이하면 잇는다
+      const gap = it.lo - cur.hi;
+      // 작은 틈은 잇고, 그보다 커도 그 틈에 창·문 개구부가 있으면 잇는다(벽 연속).
+      if (gap <= joinGap || (gap <= openMax && gapHasOpening(cur.hi, it.lo))) {
         cur.hi = Math.max(cur.hi, it.hi);
         cur.thicknessDU = Math.max(cur.thicknessDU, it.thicknessDU);
         cur.paired = cur.paired || it.paired;
@@ -247,6 +267,46 @@ function mergeCollinearWalls(jobs, o) {
     flush();
   }
   return out;
+}
+
+// 벽 접합(weld): 도면에서 이어지는 벽이 모델에서 벌어지지 않도록
+// 각 벽 끝을 만나는(평행하지 않은) 다른 벽의 축선까지 연장해 붙인다.
+// - 모서리(L): 두 벽 끝이 교점에서 만남 / T교차: 한 벽 끝이 다른 벽 축선에 닿음
+// 벽 element(mm 좌표)를 제자리 수정한다. 실제 결합 관계는 IFC에서 표현.
+function weldJunctions(walls, o) {
+  const updates = []; // [{ wall, key, point }] — 계산 후 한 번에 적용(연쇄 이동 방지)
+  for (const W of walls) {
+    const dW = unit(sub(W.end, W.start));
+    for (const key of ["start", "end"]) {
+      const E = W[key];
+      const maxExt = 1.6 * W.thickness; // 모서리 공백 ≈ 두께/2 → 두께 정도면 충분
+      let best = null, bestD = Infinity;
+      for (const U of walls) {
+        if (U === W) continue;
+        const dU = unit(sub(U.end, U.start));
+        if (Math.abs(cross(dW, dU)) < 0.05) continue;         // 평행 → 모서리 아님
+        const X = lineIntersect(W.start, dW, U.start, dU);
+        if (!X) continue;
+        const d = dist(X, E);
+        if (d > maxExt || d > 1.6 * U.thickness + maxExt) continue;
+        // 교점이 U 선분 위(두께만큼 여유) 인지
+        const tU = dot(sub(X, U.start), dU), LU = dist(U.start, U.end);
+        const tol = Math.max(W.thickness, U.thickness);
+        if (tU < -tol || tU > LU + tol) continue;
+        if (d < bestD) { bestD = d; best = X; }
+      }
+      if (best) updates.push({ wall: W, key, point: best });
+    }
+  }
+  for (const u of updates) u.wall[u.key] = u.point;
+}
+
+// 두 무한직선(점 p·방향 d, 점 q·방향 e)의 교점. 평행이면 null.
+function lineIntersect(p, d, q, e) {
+  const denom = cross(d, e);
+  if (Math.abs(denom) < 1e-9) return null;
+  const t = cross(sub(q, p), e) / denom;
+  return [p[0] + d[0] * t, p[1] + d[1] * t];
 }
 
 // 평행·근접·중첩하는 두 면 선을 두께 있는 벽으로 묶는다.
