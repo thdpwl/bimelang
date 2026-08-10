@@ -10,6 +10,8 @@ const COLORS = {
   wall: 0xb9c4d0,
   slab: 0x8f9bab,
   column: 0xc9a36a,
+  door: 0x9a6a3c,
+  window: 0x76c7e0,
   selected: 0x4c8dff,
 };
 
@@ -187,7 +189,21 @@ export class Viewer {
     if (el.type === "wall") return this._buildWall(el);
     if (el.type === "slab") return this._buildSlab(el);
     if (el.type === "column") return this._buildColumn(el);
+    if (el.type === "door" || el.type === "window") return this._buildOpening(el);
     return null;
+  }
+
+  // 문·창: 호스트 벽 방향(angle)으로 회전한 박스. sill 만큼 띄워 배치.
+  // 벽 안에 묻히지 않도록 두께를 살짝 부풀려(양면 20mm) 보이게 한다.
+  _buildOpening(el) {
+    const BULGE = 40; // mm, 벽 밖으로 살짝 튀어나오게
+    const geom = new THREE.BoxGeometry(el.width * S, el.height * S, (el.thickness + BULGE) * S);
+    const mesh = new THREE.Mesh(geom, this._material(el.type));
+    const base = ((el.elevation || 0) + (el.sill || 0)) * S;
+    mesh.position.set(el.position[0] * S, base + (el.height / 2) * S, el.position[1] * S);
+    mesh.rotation.y = -(el.angle || 0);
+    this._finish(mesh, el.type);
+    return mesh;
   }
 
   _buildColumn(el) {
