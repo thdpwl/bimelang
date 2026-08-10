@@ -85,6 +85,13 @@ function renderInspector() {
       pair(numField("width", "단면 가로", el.width), numField("depth", "단면 세로", el.depth)),
       pair(numField("height", "높이", el.height), numField("elevation", "기준 높이(EL)", el.elevation)),
     );
+  } else if (el.type === "door" || el.type === "window") {
+    rows.push(
+      pair(numField("width", "폭(W)", el.width), numField("height", "높이(H)", el.height)),
+      pair(numField("thickness", "두께", el.thickness), numField("sill", "하단 높이(sill)", el.sill)),
+      numField("elevation", "기준 높이(EL)", el.elevation),
+      `<p class="hint">${el.hostId ? `호스트 벽: ${escapeHtml(el.hostId)}` : "호스트 벽 없음(독립)"}</p>`,
+    );
   }
   box.innerHTML = rows.join("");
 
@@ -292,7 +299,7 @@ function currentMapping() {
 }
 function currentOptions() {
   const o = {};
-  for (const k of ["scale", "wallHeight", "wallThickness", "wallPairMaxGap", "wallJoinGap", "columnHeight", "slabThickness", "roofThickness", "roofElevation"]) {
+  for (const k of ["scale", "wallHeight", "wallThickness", "wallPairMaxGap", "wallJoinGap", "columnHeight", "doorHeight", "doorSill", "windowHeight", "windowSill", "slabThickness", "roofThickness", "roofElevation"]) {
     const inp = document.getElementById(`opt-${k}`);
     o[k] = inp ? parseFloat(inp.value) : 0;
   }
@@ -344,7 +351,7 @@ function setOpt(key, value) {
 $("opt-autoFloors")?.addEventListener("change", updateCadPreview);
 function updateCadPreview() {
   const c = preview(cadPrimitives, currentMapping(), currentOptions());
-  $("cad-preview").textContent = `예상 생성: 벽 ${c.wall} · 기둥 ${c.column} · 바닥 ${c.slab} · 지붕 ${c.roof}`;
+  $("cad-preview").textContent = `예상 생성: 벽 ${c.wall} · 기둥 ${c.column} · 문 ${c.door} · 창 ${c.window} · 바닥 ${c.slab} · 지붕 ${c.roof}`;
 }
 
 let cadFileName = "도면";

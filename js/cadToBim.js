@@ -1,13 +1,15 @@
 // CAD(파싱된 primitive) → BIM 요소 변환.
 // 레이어별 매핑(mapping)과 변환 옵션(options)을 받아 model.elements 배열을 만든다.
-import { createWall, createSlab, createColumn } from "./model.js";
+import { createWall, createSlab, createColumn, createDoor, createWindow } from "./model.js";
 
-export const TYPES = ["wall", "column", "slab", "roof", "ignore"];
-export const TYPE_LABEL = { wall: "벽", column: "기둥", slab: "바닥(슬래브)", roof: "지붕", ignore: "무시" };
+export const TYPES = ["wall", "column", "door", "window", "slab", "roof", "ignore"];
+export const TYPE_LABEL = { wall: "벽", column: "기둥", door: "문", window: "창(창문)", slab: "바닥(슬래브)", roof: "지붕", ignore: "무시" };
 
 // 레이어 이름으로 객체 타입 자동 추정
 export function guessType(layer) {
   const n = layer.toLowerCase();
+  if (/(door|문|출입|dr\b)/.test(n)) return "door";
+  if (/(window|창|win|sash|glaz)/.test(n)) return "window";
   if (/(wall|벽|wal|w-)/.test(n)) return "wall";
   if (/(col|기둥|pillar|column|c-)/.test(n)) return "column";
   if (/(roof|지붕|rf)/.test(n)) return "roof";
@@ -24,6 +26,11 @@ export function defaultOptions(scale = 1) {
     wallPairMaxGap: 400,   // 두 선 사이 최대 거리(mm). 이보다 멀면 별개의 벽으로 본다.
     wallJoinGap: 1000,     // 같은 직선 위 벽 조각을 이을 최대 틈(mm). 문·기둥으로 끊긴 벽을 연결.
     columnHeight: 3000,
+    // 문·창: 평면도엔 높이 정보가 없으므로 사용자가 조절하는 기본값.
+    doorHeight: 2100,      // 문 높이
+    doorSill: 0,           // 문 하단이 바닥에서 띄워진 높이
+    windowHeight: 1000,    // 창 높이
+    windowSill: 1200,      // 창 하단이 바닥에서 띄워진 높이(창대 높이)
     slabThickness: 250,
     roofThickness: 250,
     roofElevation: 3000,
@@ -40,18 +47,24 @@ export function convert(primitives, mapping, options) {
   const out = [];
   const wallPts = []; // 자동 바닥·지붕 외곽 산정용(mm 좌표)
 
-  // 벽: 전체 선을 모아 평행 2선 → 두께 있는 벽 1개로 병합 후 생성
+  // 기둥 footprint(도면 단위) — 벽에서 기둥 구간을 잘라내는 데 쓴다.
+  const columnBoxes = collectColumnBoxes(primitives, mapping);
+
+  // 벽: 전체 선을 모아 평행 2선 → 두께 있는 벽 1개로 병합,
+  // 그다음 기둥과 겹치는 구간을 잘라내 조각으로 나눠 생성한다(벽·기둥 중복 방지).
   for (const job of buildWallJobs(primitives, mapping, o)) {
-    const start = sp(job.start), end = sp(job.end);
-    wallPts.push(start, end);
-    out.push(createWall({
-      name: `벽 (${job.layer})`,
-      start, end,
-      height: o.wallHeight,
-      // 짝지어진 벽은 도면에서 측정한 두께, 단일선은 기본 두께
-      thickness: job.paired ? Math.max(1, Math.round(job.thicknessDU * s)) : o.wallThickness,
-      elevation: 0,
-    }));
+    for (const piece of subtractColumns(job, columnBoxes, o)) {
+      const start = sp(piece.start), end = sp(piece.end);
+      wallPts.push(start, end);
+      out.push(createWall({
+        name: `벽 (${piece.layer})`,
+        start, end,
+        height: o.wallHeight,
+        // 짝지어진 벽은 도면에서 측정한 두께, 단일선은 기본 두께
+        thickness: piece.paired ? Math.max(1, Math.round(piece.thicknessDU * s)) : o.wallThickness,
+        elevation: 0,
+      }));
+    }
   }
 
   for (const p of primitives) {
@@ -77,6 +90,14 @@ export function convert(primitives, mapping, options) {
           elevation: t === "roof" ? o.roofElevation : 0,
         }));
       }
+    }
+  }
+
+  // 문·창: 벽을 다 만든 뒤(위) 도면의 문·창 박스를 감지해 가장 가까운 벽에 호스팅한다.
+  const walls = out.filter((e) => e.type === "wall");
+  for (const type of ["door", "window"]) {
+    for (const box of openingBoxes(primitives, mapping, type, o)) {
+      out.push(makeOpening(type, box, walls, o, sp));
     }
   }
 
@@ -139,8 +160,13 @@ function allPointsFootprint(primitives, sp) {
 // 변환 결과 요약 (미리보기용)
 export function preview(primitives, mapping, options) {
   const o = options || defaultOptions();
-  const c = { wall: 0, column: 0, slab: 0, roof: 0 };
-  c.wall = buildWallJobs(primitives, mapping, o).length;
+  const c = { wall: 0, column: 0, door: 0, window: 0, slab: 0, roof: 0 };
+  const columnBoxes = collectColumnBoxes(primitives, mapping);
+  for (const job of buildWallJobs(primitives, mapping, o)) {
+    c.wall += subtractColumns(job, columnBoxes, o).length;
+  }
+  c.door = openingBoxes(primitives, mapping, "door", o).length;
+  c.window = openingBoxes(primitives, mapping, "window", o).length;
   for (const p of primitives) {
     const t = mapping[p.layer] || "ignore";
     if (t === "column") { if (columnFrom(p)) c.column++; }
@@ -313,6 +339,200 @@ function segments(p) {
     return segs;
   }
   return [];
+}
+
+// 기둥으로 매핑된 primitive의 footprint(도면 단위)를 모은다.
+// 반환: [{ center:[x,y], w, d }] — subtractColumns가 벽을 잘라내는 데 사용.
+function collectColumnBoxes(primitives, mapping) {
+  const boxes = [];
+  for (const p of primitives) {
+    if ((mapping[p.layer] || "ignore") !== "column") continue;
+    const col = columnFrom(p);
+    if (col) boxes.push(col);
+  }
+  return boxes;
+}
+
+// 벽 세그먼트(job)에서 기둥과 겹치는 구간을 잘라내 조각들로 나눈다.
+// 벽 선이 기둥을 관통해도, 벽 solid가 기둥과 겹치지 않도록 기둥 면에서 끊는다.
+// 좌표는 도면 단위(DU). 반환: [{ start, end, layer, paired, thicknessDU }, ...]
+function subtractColumns(job, columns, o) {
+  const p0 = job.start, p1 = job.end;
+  const L = dist(p0, p1);
+  if (!columns.length || L < 1e-6) return [job];
+
+  const dir = unit(sub(p1, p0));
+  const normal = [-dir[1], dir[0]];         // 벽에 수직인 방향
+  const scale = o.scale || 1;
+  const thDU = job.paired ? job.thicknessDU : (o.wallThickness / scale);
+  const halfT = thDU / 2;
+
+  // 기둥마다 벽 방향으로 덮는 구간 [lo,hi] 수집(수직으로 벽 두께와 겹칠 때만)
+  const cuts = [];
+  for (const col of columns) {
+    const hw = col.w / 2, hd = col.d / 2, c = col.center;
+    let tmin = Infinity, tmax = -Infinity, smin = Infinity, smax = -Infinity;
+    for (const cx of [-hw, hw]) for (const cy of [-hd, hd]) {
+      const v = sub([c[0] + cx, c[1] + cy], p0);
+      const t = dot(v, dir), sN = dot(v, normal);
+      if (t < tmin) tmin = t; if (t > tmax) tmax = t;
+      if (sN < smin) smin = sN; if (sN > smax) smax = sN;
+    }
+    if (smax < -halfT || smin > halfT) continue;   // 벽 폭 밖의 기둥 → 무시
+    const lo = Math.max(0, tmin), hi = Math.min(L, tmax);
+    if (hi > lo) cuts.push([lo, hi]);
+  }
+  if (!cuts.length) return [job];
+
+  // 겹치는 잘라낼 구간들을 병합
+  cuts.sort((a, b) => a[0] - b[0]);
+  const merged = [cuts[0].slice()];
+  for (let i = 1; i < cuts.length; i++) {
+    const last = merged[merged.length - 1];
+    if (cuts[i][0] <= last[1]) last[1] = Math.max(last[1], cuts[i][1]);
+    else merged.push(cuts[i].slice());
+  }
+
+  // 잘라낸 구간의 여집합을 벽 조각으로
+  const minLen = 10 / scale;                 // 10mm 미만 조각은 버림
+  const at = (t) => add(p0, mul(dir, t));
+  const pieces = [];
+  let cursor = 0;
+  for (const [lo, hi] of merged) {
+    if (lo - cursor > minLen) pieces.push({ ...job, start: at(cursor), end: at(lo) });
+    cursor = Math.max(cursor, hi);
+  }
+  if (L - cursor > minLen) pieces.push({ ...job, start: at(cursor), end: at(L) });
+  return pieces;
+}
+
+// ── 문·창(개구부) 감지 & 벽 호스팅 ─────────────────────────────────
+// 문·창 레이어의 선들을 근접끼리 묶어 각각을 하나의 박스(개구부)로 본다.
+// 반환: [{ center:[x,y], pts:[[x,y]...], w, d }] (도면 단위)
+function openingBoxes(primitives, mapping, type, o) {
+  const items = [];
+  for (const p of primitives) {
+    if ((mapping[p.layer] || "ignore") !== type) continue;
+    const pts = primPoints(p);
+    if (pts.length) items.push({ pts, bbox: bboxOf(pts) });
+  }
+  if (!items.length) return [];
+
+  // 근접한 원시도형(문틀·문짝 선 등)을 하나의 개구부로 병합 (union-find)
+  const scale = o.scale || 1;
+  const gap = 300 / scale; // 300mm 이내면 같은 개구부로 본다
+  const parent = items.map((_, i) => i);
+  const find = (a) => { while (parent[a] !== a) { parent[a] = parent[parent[a]]; a = parent[a]; } return a; };
+  for (let i = 0; i < items.length; i++) {
+    for (let j = i + 1; j < items.length; j++) {
+      if (bboxNear(items[i].bbox, items[j].bbox, gap)) parent[find(i)] = find(j);
+    }
+  }
+  const groups = new Map();
+  items.forEach((it, i) => {
+    const r = find(i);
+    if (!groups.has(r)) groups.set(r, []);
+    groups.get(r).push(it);
+  });
+
+  const boxes = [];
+  for (const grp of groups.values()) {
+    const pts = grp.flatMap((g) => g.pts);
+    const bb = bboxOf(pts);
+    boxes.push({
+      center: [(bb.minX + bb.maxX) / 2, (bb.minY + bb.maxY) / 2],
+      pts, w: bb.maxX - bb.minX, d: bb.maxY - bb.minY,
+    });
+  }
+  return boxes;
+}
+
+// 개구부 박스를 가장 가까운 벽에 호스팅해 문/창 요소를 만든다.
+function makeOpening(type, box, walls, o, sp) {
+  const isDoor = type === "door";
+  const height = isDoor ? o.doorHeight : o.windowHeight;
+  const sill = isDoor ? o.doorSill : o.windowSill;
+
+  // 박스를 mm 좌표로
+  const center = sp(box.center);
+  const pts = box.pts.map(sp);
+  const host = nearestWallHost(center, walls);
+
+  let angle, width, thickness, position, elevation, hostId;
+  if (host) {
+    const dir = host.dir, a = host.wall.start;
+    angle = Math.atan2(dir[1], dir[0]);
+    // 폭 = 개구부 점들을 벽 방향으로 투영한 스팬
+    const proj = pts.map((p) => dot(sub(p, center), dir));
+    width = Math.max(...proj) - Math.min(...proj);
+    thickness = host.wall.thickness;           // 두께는 호스트 벽에 맞춘다
+    // 중심을 벽 중심선 위로 스냅(벽 두께 안에 정확히 박히도록)
+    const along = dot(sub(center, a), dir);
+    position = add(a, mul(dir, along));
+    elevation = host.wall.elevation || 0;
+    hostId = host.wall.id;
+  } else {
+    // 호스트 벽 없음: 박스 자체 크기로(긴 변=폭)
+    const s = o.scale || 1;
+    width = Math.max(box.w, box.d) * s;
+    thickness = Math.min(box.w, box.d) * s;
+    angle = box.w >= box.d ? 0 : Math.PI / 2;
+    position = center;
+    elevation = 0;
+    hostId = null;
+  }
+
+  const make = isDoor ? createDoor : createWindow;
+  return make({
+    name: `${isDoor ? "문" : "창"} (${host ? "호스트 " + hostId : "독립"})`,
+    hostId, position,
+    width: Math.max(1, Math.round(width)),
+    thickness: Math.max(1, Math.round(thickness)),
+    height, sill, angle, elevation,
+  });
+}
+
+// 개구부 중심에서 수직거리가 가장 가까운 벽을 찾는다. { wall, dir } | null
+function nearestWallHost(center, walls) {
+  let best = null, bestD = Infinity;
+  for (const w of walls) {
+    const ab = sub(w.end, w.start);
+    const L = Math.hypot(ab[0], ab[1]);
+    if (L < 1e-6) continue;
+    const dir = [ab[0] / L, ab[1] / L];
+    const t = Math.max(0, Math.min(L, dot(sub(center, w.start), dir)));
+    const proj = add(w.start, mul(dir, t));
+    const d = dist(center, proj);
+    if (d < bestD) { bestD = d; best = { wall: w, dir, perp: d }; }
+  }
+  return best; // 벽이 없으면 null
+}
+
+// 원시도형의 대표 점들(bbox 산정용)
+function primPoints(p) {
+  if (p.kind === "line" || p.kind === "polyline") return p.points;
+  if (p.kind === "circle") {
+    return [
+      [p.center[0] - p.radius, p.center[1] - p.radius],
+      [p.center[0] + p.radius, p.center[1] + p.radius],
+    ];
+  }
+  return [];
+}
+
+function bboxOf(pts) {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const [x, y] of pts) {
+    if (x < minX) minX = x; if (x > maxX) maxX = x;
+    if (y < minY) minY = y; if (y > maxY) maxY = y;
+  }
+  return { minX, minY, maxX, maxY };
+}
+
+// 두 bbox가 gap 이내로 근접(또는 겹침)하는가
+function bboxNear(a, b, gap) {
+  return a.minX - gap <= b.maxX && b.minX - gap <= a.maxX &&
+         a.minY - gap <= b.maxY && b.minY - gap <= a.maxY;
 }
 
 // 기둥 형상 추출: 원 → 외접 사각, 닫힌 폴리라인 → bbox

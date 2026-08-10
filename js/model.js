@@ -72,6 +72,46 @@ export function createColumn(over = {}) {
   };
 }
 
+// 문/창: 벽을 호스트로 삼는 개구부 객체.
+//  - hostId:   호스트 벽 element id (없으면 null)
+//  - position: 벽 중심선 위 개구부 중심 [x,y] (mm)
+//  - width:    벽 방향(길이) 폭 / thickness: 벽 두께 방향 깊이
+//  - height:   개구부 높이 / sill: 바닥(elevation)에서 개구부 하단까지 띄운 높이
+//  - angle:    평면 회전(라디안, 호스트 벽 방향)
+export function createDoor(over = {}) {
+  return {
+    id: nextId("d"),
+    type: "door",
+    name: "문",
+    hostId: null,
+    position: [0, 0],
+    width: 900,
+    thickness: 200,
+    height: 2100,
+    sill: 0,
+    angle: 0,
+    elevation: 0,
+    ...over,
+  };
+}
+
+export function createWindow(over = {}) {
+  return {
+    id: nextId("wd"),
+    type: "window",
+    name: "창",
+    hostId: null,
+    position: [0, 0],
+    width: 1200,
+    thickness: 200,
+    height: 1000,
+    sill: 1200,
+    angle: 0,
+    elevation: 0,
+    ...over,
+  };
+}
+
 // 데모용 샘플: 바닥 슬래브 + 사각형 외벽 4면
 export function sampleModel() {
   _seq = 1;

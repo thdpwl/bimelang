@@ -51,6 +51,7 @@ export function exportIFC(model) {
   // --- 형상 표현 컨텍스트 ---
   const originPt = add(`IFCCARTESIANPOINT((0.,0.,0.));`);
   const worldAxis = add(`IFCAXIS2PLACEMENT3D(${originPt},$,$);`);
+  const dirZ = add(`IFCDIRECTION((0.,0.,1.));`);
   const ctx = add(`IFCGEOMETRICREPRESENTATIONCONTEXT($,'Model',3,1.E-05,${worldAxis},$);`);
 
   // --- 프로젝트 ---
@@ -69,9 +70,65 @@ export function exportIFC(model) {
   add(`IFCRELAGGREGATES('${gid()}',${owner},$,$,${site},(${building}));`);
   add(`IFCRELAGGREGATES('${gid()}',${owner},$,$,${building},(${storey}));`);
 
+  // --- 문·창 패밀리(타입) ---
+  // 같은 크기(폭·높이·두께)의 문/창은 하나의 IfcDoorType/IfcWindowType(=패밀리)을 공유한다.
+  // 타입은 원점 중심 박스 형상(IfcRepresentationMap)을 갖고, 인스턴스는 이를 IfcMappedItem으로
+  // 참조만 한다 → 나중에 타입만 교체하면 모든 인스턴스가 함께 바뀐다(패밀리 교체).
+  const openingTypes = new Map();  // key -> { typeRef, repMap }
+  const typeInstances = new Map(); // key -> { typeRef, insts:[ref,...] }
+  const ensureOpeningType = (el) => {
+    const w = el.width, h = el.height, t = el.thickness;
+    const key = `${el.type}|${Math.round(w)}|${Math.round(h)}|${Math.round(t)}`;
+    if (openingTypes.has(key)) return { ...openingTypes.get(key), key };
+    // 원점 중심 박스 프로파일 (X=폭, Y=두께), +Z로 높이만큼 압출
+    const rect = [[-w / 2, -t / 2], [w / 2, -t / 2], [w / 2, t / 2], [-w / 2, t / 2]]
+      .map((q) => add(`IFCCARTESIANPOINT((${num(q[0])},${num(q[1])}));`));
+    const poly = add(`IFCPOLYLINE((${[...rect, rect[0]].join(",")}));`);
+    const prof = add(`IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,${poly});`);
+    const solid = add(`IFCEXTRUDEDAREASOLID(${prof},${worldAxis},${dirZ},${num(h)});`);
+    const shapeRep = add(`IFCSHAPEREPRESENTATION(${ctx},'Body','SweptSolid',(${solid}));`);
+    const repMap = add(`IFCREPRESENTATIONMAP(${worldAxis},${shapeRep});`);
+    const g = gid();
+    const nm = esc(`${el.type === "door" ? "문" : "창"} ${Math.round(w)}x${Math.round(h)}`);
+    const typeRef = el.type === "door"
+      ? add(`IFCDOORTYPE('${g}',${owner},'${nm}',$,$,(${repMap}),$,$,.NOTDEFINED.,.NOTDEFINED.,$,$);`)
+      : add(`IFCWINDOWTYPE('${g}',${owner},'${nm}',$,$,(${repMap}),$,$,.NOTDEFINED.,.NOTDEFINED.,$,$);`);
+    const rec = { typeRef, repMap };
+    openingTypes.set(key, rec);
+    return { ...rec, key };
+  };
+
   // --- 요소 ---
   const productRefs = [];
   for (const el of model.elements) {
+    // 문·창: 패밀리(타입) 인스턴스로 배치 (형상은 타입에서 매핑)
+    if (el.type === "door" || el.type === "window") {
+      const { typeRef, repMap, key } = ensureOpeningType(el);
+      const [cx, cy] = el.position;
+      const z0 = (el.elevation || 0) + (el.sill || 0);
+      const a = el.angle || 0;
+      // 인스턴스 배치: 월드 위치(cx,cy,z0) + 벽 방향 회전(Z축 기준)
+      const loc = add(`IFCCARTESIANPOINT((${num(cx)},${num(cy)},${num(z0)}));`);
+      const refDir = add(`IFCDIRECTION((${num(Math.cos(a))},${num(Math.sin(a))},0.));`);
+      const axis = add(`IFCAXIS2PLACEMENT3D(${loc},${dirZ},${refDir});`);
+      const elPl = add(`IFCLOCALPLACEMENT(${storeyPl},${axis});`);
+      // 타입 형상을 항등 변환으로 매핑
+      const top = add(`IFCCARTESIANTRANSFORMATIONOPERATOR3D($,$,${originPt},$,$);`);
+      const mapped = add(`IFCMAPPEDITEM(${repMap},${top});`);
+      const shapeRep = add(`IFCSHAPEREPRESENTATION(${ctx},'Body','MappedRepresentation',(${mapped}));`);
+      const prodShape = add(`IFCPRODUCTDEFINITIONSHAPE($,$,(${shapeRep}));`);
+      const nm = esc(el.name || el.type);
+      const tag = esc(el.id || "");
+      const g = gid();
+      const ref = el.type === "door"
+        ? add(`IFCDOOR('${g}',${owner},'${nm}',$,$,${elPl},${prodShape},'${tag}',${num(el.height)},${num(el.width)},$,$,$);`)
+        : add(`IFCWINDOW('${g}',${owner},'${nm}',$,$,${elPl},${prodShape},'${tag}',${num(el.height)},${num(el.width)},$,$,$);`);
+      productRefs.push(ref);
+      if (!typeInstances.has(key)) typeInstances.set(key, { typeRef, insts: [] });
+      typeInstances.get(key).insts.push(ref);
+      continue;
+    }
+
     const fp = footprint(el);
     if (!fp) continue;
 
@@ -107,6 +164,11 @@ export function exportIFC(model) {
       ref = add(`IFCBUILDINGELEMENTPROXY('${g}',${owner},'${nm}',$,$,${elPl},${prodShape},'${tag}',$);`);
     }
     productRefs.push(ref);
+  }
+
+  // 문·창 인스턴스를 각자의 패밀리(타입)에 연결 (IfcRelDefinesByType) → 나중에 타입 교체 가능
+  for (const { typeRef, insts } of typeInstances.values()) {
+    add(`IFCRELDEFINESBYTYPE('${gid()}',${owner},$,$,(${insts.join(",")}),${typeRef});`);
   }
 
   // 요소를 층에 공간적으로 포함
@@ -184,6 +246,7 @@ function footprint(el) {
       depth: el.height,
     };
   }
+  // 문·창은 exportIFC에서 패밀리(타입) 인스턴스로 별도 처리한다.
   return null;
 }
 
