@@ -100,7 +100,8 @@ export function exportIFC(model) {
 
   // --- 요소 ---
   const productRefs = [];
-  const wallRefs = []; // 벽 결합(join) 관계 산출용 [{ el, ref }]
+  const wallRefs = [];    // 벽 결합(join)·개구부 산출용 [{ el, ref }]
+  const openingRefs = []; // 문·창 인스턴스 [{ el, ref }] — 호스트 벽에 개구부(void) 생성용
   for (const el of model.elements) {
     // 문·창: 패밀리(타입) 인스턴스로 배치 (형상은 타입에서 매핑)
     if (el.type === "door" || el.type === "window") {
@@ -125,6 +126,7 @@ export function exportIFC(model) {
         ? add(`IFCDOOR('${g}',${owner},'${nm}',$,$,${elPl},${prodShape},'${tag}',${num(el.height)},${num(el.width)},$,$,$);`)
         : add(`IFCWINDOW('${g}',${owner},'${nm}',$,$,${elPl},${prodShape},'${tag}',${num(el.height)},${num(el.width)},$,$,$);`);
       productRefs.push(ref);
+      openingRefs.push({ el, ref });
       if (!typeInstances.has(key)) typeInstances.set(key, { typeRef, insts: [] });
       typeInstances.get(key).insts.push(ref);
       continue;
@@ -179,6 +181,32 @@ export function exportIFC(model) {
     add(`IFCRELCONNECTSPATHELEMENTS('${gid()}',${owner},$,$,$,${rel.a},${rel.b},(0),(0),.${rel.ca}.,.${rel.cb}.);`);
   }
 
+  // 개구부(void): 문·창이 호스트 벽에 실제 구멍을 뚫는다.
+  //  IfcOpeningElement(구멍 형상) + IfcRelVoidsElement(벽에서 구멍 빼기) + IfcRelFillsElement(구멍을 문·창으로 채움)
+  //  → BIM 도구에서 벽에 구멍이 나고 그 자리에 문·창이 들어간다(간섭 없음).
+  const wallElById = new Map(wallRefs.map((w) => [w.el.id, w.el]));
+  const wallRefById = new Map(wallRefs.map((w) => [w.el.id, w.ref]));
+  for (const { el, ref } of openingRefs) {
+    const host = el.hostId ? wallElById.get(el.hostId) : null;
+    const hostRef = el.hostId ? wallRefById.get(el.hostId) : null;
+    if (!host || !hostRef) continue;
+    // 구멍 형상: 폭 × (벽두께+여유), sill~sill+height (벽을 완전히 관통)
+    const depth = (host.thickness || el.thickness || 200) + 40;
+    const fp = openingVoidFootprint(el, depth);
+    const pts = fp.pts.map((p) => add(`IFCCARTESIANPOINT((${num(p[0])},${num(p[1])}));`));
+    const poly = add(`IFCPOLYLINE((${[...pts, pts[0]].join(",")}));`);
+    const prof = add(`IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,${poly});`);
+    const basePt = add(`IFCCARTESIANPOINT((0.,0.,${num(fp.z0)}));`);
+    const baseAxis = add(`IFCAXIS2PLACEMENT3D(${basePt},$,$);`);
+    const solid = add(`IFCEXTRUDEDAREASOLID(${prof},${baseAxis},${dirZ},${num(fp.depth)});`);
+    const shapeRep = add(`IFCSHAPEREPRESENTATION(${ctx},'Body','SweptSolid',(${solid}));`);
+    const prodShape = add(`IFCPRODUCTDEFINITIONSHAPE($,$,(${shapeRep}));`);
+    const opPl = add(`IFCLOCALPLACEMENT(${storeyPl},${worldAxis});`);
+    const op = add(`IFCOPENINGELEMENT('${gid()}',${owner},'${esc("개구부")}',$,$,${opPl},${prodShape},$,.OPENING.);`);
+    add(`IFCRELVOIDSELEMENT('${gid()}',${owner},$,$,${hostRef},${op});`);
+    add(`IFCRELFILLSELEMENT('${gid()}',${owner},$,$,${op},${ref});`);
+  }
+
   // 요소를 층에 공간적으로 포함
   if (productRefs.length) {
     add(`IFCRELCONTAINEDINSPATIALSTRUCTURE('${gid()}',${owner},$,$,(${productRefs.join(",")}),${storey});`);
@@ -211,6 +239,22 @@ function esc(s) {
   }
   flush();
   return out;
+}
+
+// 개구부(void) 발자국: 문·창 위치에 폭 × depth(벽두께+여유) 박스를 벽 방향으로 회전.
+// sill~sill+height 를 +Z로 압출해 벽을 관통하는 구멍을 만든다.
+function openingVoidFootprint(el, depth) {
+  const [cx, cy] = el.position;
+  const a = el.angle || 0;
+  const dx = Math.cos(a), dy = Math.sin(a);   // 벽 방향(폭)
+  const nx = -Math.sin(a), ny = Math.cos(a);  // 벽 수직(두께)
+  const hw = el.width / 2, ht = depth / 2;
+  const corner = (sw, st) => [cx + dx * sw * hw + nx * st * ht, cy + dy * sw * hw + ny * st * ht];
+  return {
+    pts: [corner(-1, -1), corner(1, -1), corner(1, 1), corner(-1, 1)],
+    z0: (el.elevation || 0) + (el.sill || 0),
+    depth: el.height,
+  };
 }
 
 // 요소별 2D 발자국(footprint) + 바닥높이(z0) + 압출깊이(depth).

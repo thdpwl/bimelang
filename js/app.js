@@ -146,8 +146,8 @@ function resizeSlab(el, newW, newD) {
 function onTransform(mesh) {
   const el = model.elements.find((e) => e.id === mesh.userData.id);
   if (!el) return;
-  // 비정형(프로파일) 요소는 박스 파라미터가 없어 기즈모 분해를 건너뛴다.
-  if (el.profile) { status(`${el.name || el.id} 비정형 객체는 기즈모 편집을 지원하지 않습니다`); return; }
+  // 비정형(프로파일) 요소나 개구부로 분할된 벽(그룹)은 박스 파라미터가 없어 기즈모 분해를 건너뛴다.
+  if (el.profile || !mesh.geometry) { status(`${el.name || el.id} 은(는) 기즈모 편집을 지원하지 않습니다`); return; }
   if (el.type === "wall") {
     Object.assign(el, decomposeWall({
       pos: mesh.position, scale: mesh.scale, rotY: mesh.rotation.y,

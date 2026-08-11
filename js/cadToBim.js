@@ -26,6 +26,7 @@ export function defaultOptions(scale = 1) {
     wallPairMaxGap: 400,   // 두 선 사이 최대 거리(mm). 이보다 멀면 별개의 벽으로 본다.
     wallJoinGap: 1000,     // 같은 직선 위 벽 조각을 이을 최대 틈(mm). 문·기둥으로 끊긴 벽을 연결.
     openingMaxWidth: 3000, // 창·문 개구부로 끊긴 같은 직선 벽을 이을 최대 개구부 폭(mm).
+    curvedWalls: false,    // 곡선·비정형 벽 자동 생성(닫힌 윤곽 채우기/곡선 밴드). 기본 꺼짐(직선만).
     columnHeight: 3000,
     // 문·창: 평면도엔 높이 정보가 없으므로 사용자가 조절하는 기본값.
     doorHeight: 2100,      // 문 높이
@@ -75,11 +76,13 @@ export function convert(primitives, mapping, options) {
   resolveWallJoins(wallEls, o);
   for (const w of wallEls) { wallPts.push(w.start, w.end); out.push(w); }
 
-  // 비정형 벽: 닫힌 폴리라인(윤곽) 또는 곡선/호(중심선)를 임의 프로파일 벽으로 생성.
-  for (const pw of buildProfileWalls(primitives, mapping, o)) {
-    const profile = pw.profile.map(sp);
-    for (const p of profile) wallPts.push(p);
-    out.push(createWall({ name: `벽 (${pw.layer})`, profile, height: o.wallHeight, thickness: o.wallThickness, elevation: 0 }));
+  // 비정형 벽(옵션): 닫힌 폴리라인(윤곽)·곡선을 프로파일 벽으로. 기본 꺼짐 — 켜면 곡선/비정형 지원.
+  if (o.curvedWalls) {
+    for (const pw of buildProfileWalls(primitives, mapping, o)) {
+      const profile = pw.profile.map(sp);
+      for (const p of profile) wallPts.push(p);
+      out.push(createWall({ name: `벽 (${pw.layer})`, profile, height: o.wallHeight, thickness: o.wallThickness, elevation: 0 }));
+    }
   }
 
   for (const p of primitives) {
@@ -183,7 +186,7 @@ export function preview(primitives, mapping, options) {
   for (const job of buildWallJobs(primitives, mapping, o, openingCentersDU)) {
     c.wall += subtractColumns(job, columnBoxes, o).length;
   }
-  c.wall += buildProfileWalls(primitives, mapping, o).length; // 곡선/비정형 벽
+  if (o.curvedWalls) c.wall += buildProfileWalls(primitives, mapping, o).length; // 곡선/비정형 벽(옵션)
   c.door = doorBoxes.length;
   c.window = winBoxes.length;
   for (const p of primitives) {
@@ -211,7 +214,7 @@ function buildWallJobs(primitives, mapping, o, openingCentersDU = []) {
   const segs = [];
   for (const p of primitives) {
     if ((mapping[p.layer] || "ignore") !== "wall") continue;
-    if (isProfileWallPrimitive(p)) continue; // 닫힌 윤곽·곡선은 프로파일 벽으로 별도 처리
+    if (o.curvedWalls && isProfileWallPrimitive(p)) continue; // 곡선 옵션 켰을 때만 프로파일 벽으로 분리
     for (const [a, b] of segments(p)) {
       if (dist(a, b) < 1) continue;
       segs.push({ a, b, layer: p.layer });
