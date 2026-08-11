@@ -152,22 +152,37 @@ export class Viewer {
     this.pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     this.pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
     this.raycaster.setFromCamera(this.pointer, this.camera);
-    const hits = this.raycaster.intersectObjects([...this.meshes.values()], false);
-    this.callbacks.onSelect?.(hits.length ? hits[0].object.userData.id : null);
+    // 분할된 벽은 그룹(자식 박스)이므로 재귀 교차 후 id 가진 부모까지 올라간다.
+    const hits = this.raycaster.intersectObjects([...this.meshes.values()], true);
+    let id = null;
+    if (hits.length) {
+      let o = hits[0].object;
+      while (o && o.userData.id === undefined) o = o.parent;
+      id = o ? o.userData.id : null;
+    }
+    this.callbacks.onSelect?.(id);
   }
 
   // 모델 전체를 다시 그린다 (MVP는 단순함을 위해 매 변경마다 재구축)
   render(model, selectedId) {
     this.transform.detach();
-    for (const mesh of this.meshes.values()) {
-      mesh.geometry.dispose();
-      mesh.material.dispose();
-      this.scene.remove(mesh);
+    for (const obj of this.meshes.values()) {
+      obj.traverse((n) => { n.geometry?.dispose(); n.material?.dispose(); });
+      this.scene.remove(obj);
     }
     this.meshes.clear();
 
+    // 문·창을 호스트 벽별로 모아 벽을 개구부로 분할해 그린다.
+    const openingsByHost = new Map();
     for (const el of model.elements) {
-      const mesh = this._buildMesh(el);
+      if ((el.type === "door" || el.type === "window") && el.hostId) {
+        if (!openingsByHost.has(el.hostId)) openingsByHost.set(el.hostId, []);
+        openingsByHost.get(el.hostId).push(el);
+      }
+    }
+
+    for (const el of model.elements) {
+      const mesh = this._buildMesh(el, openingsByHost.get(el.id) || []);
       if (!mesh) continue;
       mesh.userData.id = el.id;
       this.meshes.set(el.id, mesh);
@@ -178,26 +193,32 @@ export class Viewer {
   }
 
   highlight(selectedId) {
-    for (const [id, mesh] of this.meshes) {
+    for (const [id, obj] of this.meshes) {
       const isSel = id === selectedId;
-      mesh.material.color.setHex(isSel ? COLORS.selected : COLORS[mesh.userData.type]);
-      mesh.material.emissive.setHex(isSel ? 0x12305f : 0x000000);
+      const type = obj.userData.type;
+      obj.traverse((n) => {
+        if (!n.material) return;
+        n.material.color.setHex(isSel ? COLORS.selected : COLORS[type]);
+        n.material.emissive.setHex(isSel ? 0x12305f : 0x000000);
+      });
     }
   }
 
-  _buildMesh(el) {
-    if (el.type === "wall") return this._buildWall(el);
+  _buildMesh(el, openings = []) {
+    if (el.type === "wall") return this._buildWall(el, openings);
     if (el.type === "slab") return this._buildSlab(el);
     if (el.type === "column") return this._buildColumn(el);
     if (el.type === "door" || el.type === "window") return this._buildOpening(el);
     return null;
   }
 
-  // 문·창: 호스트 벽 방향(angle)으로 회전한 박스. sill 만큼 띄워 배치.
-  // 벽 안에 묻히지 않도록 두께를 살짝 부풀려(양면 20mm) 보이게 한다.
+  // 문·창: 벽에 뚫린 구멍(개구부) 안에 들어가는 패널. 개구부보다 살짝 작게(테두리 여백)
+  // + 벽보다 얇게 넣어 벽 면과 겹치지 않게(간섭 없이) 그린다.
   _buildOpening(el) {
-    const BULGE = 40; // mm, 벽 밖으로 살짝 튀어나오게
-    const geom = new THREE.BoxGeometry(el.width * S, el.height * S, (el.thickness + BULGE) * S);
+    const iw = Math.max(1, el.width - 30);          // 좌우 여백
+    const ih = Math.max(1, el.height - 15);         // 상하 여백
+    const it = Math.max(40, (el.thickness || 200) * 0.5); // 얇은 패널(벽 중앙에)
+    const geom = new THREE.BoxGeometry(iw * S, ih * S, it * S);
     const mesh = new THREE.Mesh(geom, this._material(el.type));
     const base = ((el.elevation || 0) + (el.sill || 0)) * S;
     mesh.position.set(el.position[0] * S, base + (el.height / 2) * S, el.position[1] * S);
@@ -234,18 +255,60 @@ export class Viewer {
     return mesh;
   }
 
-  _buildWall(el) {
+  _buildWall(el, openings = []) {
     if (Array.isArray(el.profile) && el.profile.length >= 3) return this._buildProfilePrism(el, "wall");
     const [x1, y1] = el.start, [x2, y2] = el.end;
     const len = Math.hypot(x2 - x1, y2 - y1);
     if (len < 1) return null;
-    const geom = new THREE.BoxGeometry(len * S, el.height * S, el.thickness * S);
+    const E = el.elevation || 0, H = el.height, T = el.thickness;
     const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
-    const mesh = new THREE.Mesh(geom, this._material("wall"));
-    mesh.position.set(mx * S, (el.elevation + el.height / 2) * S, my * S);
-    mesh.rotation.y = -Math.atan2(y2 - y1, x2 - x1);
-    this._finish(mesh, "wall");
-    return mesh;
+    const angY = -Math.atan2(y2 - y1, x2 - x1);
+
+    if (!openings.length) {
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(len * S, H * S, T * S), this._material("wall"));
+      mesh.position.set(mx * S, (E + H / 2) * S, my * S);
+      mesh.rotation.y = angY;
+      this._finish(mesh, "wall");
+      return mesh;
+    }
+
+    // 개구부가 있으면 좌우·상하로 나눈 박스 그룹 → 벽에 실제 구멍이 보인다.
+    const group = new THREE.Group();
+    group.position.set(mx * S, 0, my * S);
+    group.rotation.y = angY;
+    group.userData.type = "wall";
+    for (const pc of this._wallPieces(el, openings, len)) {
+      const w = pc.uEnd - pc.uStart, h = pc.zTop - pc.zBot;
+      if (w < 1 || h < 1) continue;
+      const box = new THREE.Mesh(new THREE.BoxGeometry(w * S, h * S, T * S), this._material("wall"));
+      box.position.set(((pc.uStart + pc.uEnd) / 2 - len / 2) * S, ((pc.zBot + pc.zTop) / 2) * S, 0);
+      this._finish(box, "wall");
+      group.add(box);
+    }
+    return group;
+  }
+
+  // 벽을 개구부(문·창) 기준으로 좌우 구간 + 개구부 하부(sill)·상부(head)로 쪼갠다.
+  // 반환: [{ uStart, uEnd, zBot, zTop }] (u=벽 시작부터 거리, z=월드 높이; mm)
+  _wallPieces(el, openings, len) {
+    const E = el.elevation || 0, H = el.height;
+    let dx = el.end[0] - el.start[0], dy = el.end[1] - el.start[1];
+    const L = Math.hypot(dx, dy) || 1; dx /= L; dy /= L;
+    const ops = openings.map((o) => {
+      const u = (o.position[0] - el.start[0]) * dx + (o.position[1] - el.start[1]) * dy;
+      return { u0: Math.max(0, u - o.width / 2), u1: Math.min(len, u + o.width / 2), sill: o.sill || 0, top: (o.sill || 0) + o.height };
+    }).filter((o) => o.u1 > o.u0).sort((a, b) => a.u0 - b.u0);
+
+    const pieces = [];
+    let cursor = 0;
+    for (const o of ops) {
+      if (o.u0 > cursor) pieces.push({ uStart: cursor, uEnd: o.u0, zBot: E, zTop: E + H }); // 개구부 사이 전체높이
+      if (o.sill > 0) pieces.push({ uStart: o.u0, uEnd: o.u1, zBot: E, zTop: E + o.sill });   // 하부(창대)
+      if (o.top < H) pieces.push({ uStart: o.u0, uEnd: o.u1, zBot: E + o.top, zTop: E + H });  // 상부(인방)
+      cursor = Math.max(cursor, o.u1);
+    }
+    if (cursor < len) pieces.push({ uStart: cursor, uEnd: len, zBot: E, zTop: E + H });
+    return pieces;
   }
 
   _buildSlab(el) {

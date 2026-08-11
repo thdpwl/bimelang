@@ -108,28 +108,32 @@ export function parseDXF(text) {
         if (pts.length >= 2) { primitives.push({ kind: "polyline", layer, points: pts, closed: false }); note(layer); }
 
       } else if (e.type === "LWPOLYLINE") {
-        const pts = [];
+        // 정점을 bulge(볼록값)와 함께 모은 뒤, bulge>0 구간은 호로 분해한다.
+        const verts = [];
         let x = null, closed = false;
         for (const c of e.codes) {
           if (c.code === 70) closed = (parseInt(c.value, 10) & 1) === 1;
           else if (c.code === 10) x = num(c.value);
-          else if (c.code === 20 && x !== null) { pts.push(tf([x, num(c.value)])); x = null; }
+          else if (c.code === 20 && x !== null) { verts.push({ x, y: num(c.value), bulge: 0 }); x = null; }
+          else if (c.code === 42 && verts.length) verts[verts.length - 1].bulge = num(c.value);
         }
+        const pts = polylineFromVerts(verts, closed).map(tf);
         if (pts.length >= 2) { primitives.push({ kind: "polyline", layer, points: pts, closed }); note(layer); }
 
       } else if (e.type === "POLYLINE") {
-        // 구형 POLYLINE: 뒤따르는 VERTEX 들을 SEQEND 까지 수집
+        // 구형 POLYLINE: 뒤따르는 VERTEX 들을 SEQEND 까지 수집 (bulge 포함)
         let closed = false;
         const flag = e.codes.find((c) => c.code === 70);
         if (flag) closed = (parseInt(flag.value, 10) & 1) === 1;
-        const pts = [];
+        const verts = [];
         let j = k + 1;
         for (; j < ents.length && ents[j].type === "VERTEX"; j++) {
           const gg = (c) => ents[j].codes.find((x) => x.code === c)?.value;
-          const pt = tf([num(gg(10)), num(gg(20))]);
-          if (valid(pt)) pts.push(pt);
+          const pt = [num(gg(10)), num(gg(20))];
+          if (valid(pt)) verts.push({ x: pt[0], y: pt[1], bulge: num(gg(42)) || 0 });
         }
         k = j - 1; // VERTEX 만큼 건너뛰기 (SEQEND 는 다음 루프에서 무시)
+        const pts = polylineFromVerts(verts, closed).map(tf);
         if (pts.length >= 2) { primitives.push({ kind: "polyline", layer, points: pts, closed }); note(layer); }
 
       } else if (e.type === "INSERT") {
@@ -155,6 +159,60 @@ export function parseDXF(text) {
 
   emit(groupEntities(sectionRange("ENTITIES")), (p) => p, null, 0);
   return { primitives, layers, insunits };
+}
+
+// (bulge 포함) 정점 목록 → 실제 점열. bulge>0 세그먼트는 호로 분해한다.
+function polylineFromVerts(verts, closed) {
+  const pts = [];
+  const n = verts.length;
+  for (let i = 0; i < n; i++) {
+    const v = verts[i];
+    pts.push([v.x, v.y]);
+    const nx = i + 1 < n ? verts[i + 1] : (closed ? verts[0] : null);
+    if (nx && Math.abs(v.bulge) > 1e-6) {
+      for (const q of tessellateBulge([v.x, v.y], [nx.x, nx.y], v.bulge)) pts.push(q);
+    }
+  }
+  return pts;
+}
+
+// bulge(=tan(θ/4))로 정의된 두 정점 사이 호를 중간 점들로 분해(양 끝점 제외).
+function tessellateBulge(p1, p2, bulge) {
+  const dx = p2[0] - p1[0], dy = p2[1] - p1[1];
+  const L = Math.hypot(dx, dy);
+  if (L < 1e-9 || Math.abs(bulge) < 1e-6) return [];
+  const px = -dy / L, py = dx / L;               // 좌측 수직 단위
+  const sag = (L / 2) * bulge;                   // 부호 있는 새기타(호 정점 편차)
+  const apex = [(p1[0] + p2[0]) / 2 + px * sag, (p1[1] + p2[1]) / 2 + py * sag];
+  const c = circumcenter(p1, apex, p2);
+  if (!c) return [];
+  const R = Math.hypot(p1[0] - c[0], p1[1] - c[1]);
+  const a0 = Math.atan2(p1[1] - c[1], p1[0] - c[0]);
+  const a2 = Math.atan2(p2[1] - c[1], p2[0] - c[0]);
+  const aA = Math.atan2(apex[1] - c[1], apex[0] - c[0]);
+  const norm = (a) => { while (a <= -Math.PI) a += 2 * Math.PI; while (a > Math.PI) a -= 2 * Math.PI; return a; };
+  const toApex = norm(aA - a0);
+  let sweep = norm(a2 - a0);
+  if (toApex >= 0 && sweep < 0) sweep += 2 * Math.PI;   // 호 정점을 지나는 방향으로 스윕
+  if (toApex < 0 && sweep > 0) sweep -= 2 * Math.PI;
+  const n = Math.max(1, Math.ceil(Math.abs(sweep) / (Math.PI / 12))); // ~15° 간격
+  const out = [];
+  for (let i = 1; i < n; i++) {
+    const a = a0 + sweep * (i / n);
+    out.push([c[0] + R * Math.cos(a), c[1] + R * Math.sin(a)]);
+  }
+  return out;
+}
+
+// 세 점의 외심(원주 중심). 공선이면 null.
+function circumcenter(A, B, C) {
+  const d = 2 * (A[0] * (B[1] - C[1]) + B[0] * (C[1] - A[1]) + C[0] * (A[1] - B[1]));
+  if (Math.abs(d) < 1e-9) return null;
+  const a2 = A[0] * A[0] + A[1] * A[1], b2 = B[0] * B[0] + B[1] * B[1], c2 = C[0] * C[0] + C[1] * C[1];
+  return [
+    (a2 * (B[1] - C[1]) + b2 * (C[1] - A[1]) + c2 * (A[1] - B[1])) / d,
+    (a2 * (C[0] - B[0]) + b2 * (A[0] - C[0]) + c2 * (B[0] - A[0])) / d,
+  ];
 }
 
 // 호(ARC)를 점들로 샘플링 (~22.5° 간격). a0,a1: 시작·끝 각(도).
