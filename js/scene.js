@@ -207,6 +207,7 @@ export class Viewer {
   }
 
   _buildColumn(el) {
+    if (Array.isArray(el.profile) && el.profile.length >= 3) return this._buildProfilePrism(el, "column");
     const geom = new THREE.BoxGeometry(el.width * S, el.height * S, el.depth * S);
     const mesh = new THREE.Mesh(geom, this._material("column"));
     mesh.position.set(el.position[0] * S, ((el.elevation || 0) + el.height / 2) * S, el.position[1] * S);
@@ -214,7 +215,27 @@ export class Viewer {
     return mesh;
   }
 
+  // 비정형 프로파일(임의 다각형)을 elevation에서 height 만큼 수직 압출한 프리즘.
+  // 곡선/사선/두께 비일정 벽, 비정형 기둥 등에 사용.
+  _buildProfilePrism(el, type) {
+    const c = slabCentroid(el.profile);
+    const shape = new THREE.Shape();
+    el.profile.forEach(([x, y], i) => {
+      const X = (x - c[0]) * S, Y = (y - c[1]) * S;
+      i === 0 ? shape.moveTo(X, Y) : shape.lineTo(X, Y);
+    });
+    shape.closePath();
+    const geom = new THREE.ExtrudeGeometry(shape, { depth: el.height * S, bevelEnabled: false });
+    geom.rotateX(Math.PI / 2);            // 평면 XY → 월드 XZ
+    geom.translate(0, el.height * S, 0);  // 바닥을 elevation 위로
+    const mesh = new THREE.Mesh(geom, this._material(type));
+    mesh.position.set(c[0] * S, (el.elevation || 0) * S, c[1] * S);
+    this._finish(mesh, type);
+    return mesh;
+  }
+
   _buildWall(el) {
+    if (Array.isArray(el.profile) && el.profile.length >= 3) return this._buildProfilePrism(el, "wall");
     const [x1, y1] = el.start, [x2, y2] = el.end;
     const len = Math.hypot(x2 - x1, y2 - y1);
     if (len < 1) return null;

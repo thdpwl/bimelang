@@ -70,10 +70,17 @@ export function convert(primitives, mapping, options) {
       }));
     }
   }
-  // 접합: 도면에서 이어지는 벽이 모델에서 벌어지지 않도록 모서리·T교차부에서
-  // 벽 끝을 만나는 지점까지 연장한다(공백 제거). 실제 결합 관계는 IFC에서 표현.
-  weldJunctions(wallEls, o);
+  // 접합: 모서리·T교차부에서 한 벽이 코너를 덮고 다른 벽은 그 면에 맞대어 끊는
+  // 맞댐 접합으로 공백·간섭 없이 매끈하게 맞물린다. 접합 관계는 IFC에서 표현.
+  resolveWallJoins(wallEls, o);
   for (const w of wallEls) { wallPts.push(w.start, w.end); out.push(w); }
+
+  // 비정형 벽: 닫힌 폴리라인(윤곽) 또는 곡선/호(중심선)를 임의 프로파일 벽으로 생성.
+  for (const pw of buildProfileWalls(primitives, mapping, o)) {
+    const profile = pw.profile.map(sp);
+    for (const p of profile) wallPts.push(p);
+    out.push(createWall({ name: `벽 (${pw.layer})`, profile, height: o.wallHeight, thickness: o.wallThickness, elevation: 0 }));
+  }
 
   for (const p of primitives) {
     const t = mapping[p.layer] || "ignore";
@@ -87,6 +94,8 @@ export function convert(primitives, mapping, options) {
           position: sp(col.center),
           width: col.w * s, depth: col.d * s,
           height: o.columnHeight, elevation: 0,
+          // 사각이 아닌 닫힌 폴리라인은 실제 형상(프로파일)으로 → 비정형 기둥
+          ...(col.profile ? { profile: col.profile.map(sp) } : {}),
         }));
       }
     } else if (t === "slab" || t === "roof") {
@@ -102,7 +111,8 @@ export function convert(primitives, mapping, options) {
   }
 
   // 문·창: 벽을 다 만든 뒤(위) 감지한 문·창 박스를 가장 가까운 벽에 호스팅한다.
-  const walls = out.filter((e) => e.type === "wall");
+  // (직선 벽만 호스트 — 프로파일 벽은 start/end 축선이 없음)
+  const walls = out.filter((e) => e.type === "wall" && !e.profile);
   for (const box of doorBoxes) out.push(makeOpening("door", box, walls, o, sp));
   for (const box of winBoxes) out.push(makeOpening("window", box, walls, o, sp));
 
@@ -173,6 +183,7 @@ export function preview(primitives, mapping, options) {
   for (const job of buildWallJobs(primitives, mapping, o, openingCentersDU)) {
     c.wall += subtractColumns(job, columnBoxes, o).length;
   }
+  c.wall += buildProfileWalls(primitives, mapping, o).length; // 곡선/비정형 벽
   c.door = doorBoxes.length;
   c.window = winBoxes.length;
   for (const p of primitives) {
@@ -200,6 +211,7 @@ function buildWallJobs(primitives, mapping, o, openingCentersDU = []) {
   const segs = [];
   for (const p of primitives) {
     if ((mapping[p.layer] || "ignore") !== "wall") continue;
+    if (isProfileWallPrimitive(p)) continue; // 닫힌 윤곽·곡선은 프로파일 벽으로 별도 처리
     for (const [a, b] of segments(p)) {
       if (dist(a, b) < 1) continue;
       segs.push({ a, b, layer: p.layer });
@@ -269,36 +281,88 @@ function mergeCollinearWalls(jobs, o, openingCentersDU = []) {
   return out;
 }
 
-// 벽 접합(weld): 도면에서 이어지는 벽이 모델에서 벌어지지 않도록
-// 각 벽 끝을 만나는(평행하지 않은) 다른 벽의 축선까지 연장해 붙인다.
-// - 모서리(L): 두 벽 끝이 교점에서 만남 / T교차: 한 벽 끝이 다른 벽 축선에 닿음
-// 벽 element(mm 좌표)를 제자리 수정한다. 실제 결합 관계는 IFC에서 표현.
-function weldJunctions(walls, o) {
-  const updates = []; // [{ wall, key, point }] — 계산 후 한 번에 적용(연쇄 이동 방지)
+// 벽 접합 정리: 도면에서 이어지는 벽을 공백·간섭 없이 매끈하게 맞물리게 한다.
+// 각 벽 끝에서 만나는 벽을 찾아 한쪽은 코너를 덮고(cover) 다른쪽은 그 면에 맞대어(butt)
+// 끊는다 → 두 박스가 겹치지 않는 맞댐 접합. 접합 관계(joins)도 기록해 IFC로 내보낸다.
+// 벽 element(mm 좌표)를 제자리 수정한다.
+function resolveWallJoins(walls, o) {
+  // 1) 각 벽 끝의 이웃·교점 계산 (원본 기하 기준, 이후 일괄 적용)
+  const plans = [];
   for (const W of walls) {
-    const dW = unit(sub(W.end, W.start));
+    const body = unit(sub(W.end, W.start));
     for (const key of ["start", "end"]) {
       const E = W[key];
-      const maxExt = 1.6 * W.thickness; // 모서리 공백 ≈ 두께/2 → 두께 정도면 충분
-      let best = null, bestD = Infinity;
-      for (const U of walls) {
-        if (U === W) continue;
-        const dU = unit(sub(U.end, U.start));
-        if (Math.abs(cross(dW, dU)) < 0.05) continue;         // 평행 → 모서리 아님
-        const X = lineIntersect(W.start, dW, U.start, dU);
-        if (!X) continue;
-        const d = dist(X, E);
-        if (d > maxExt || d > 1.6 * U.thickness + maxExt) continue;
-        // 교점이 U 선분 위(두께만큼 여유) 인지
-        const tU = dot(sub(X, U.start), dU), LU = dist(U.start, U.end);
-        const tol = Math.max(W.thickness, U.thickness);
-        if (tU < -tol || tU > LU + tol) continue;
-        if (d < bestD) { bestD = d; best = X; }
-      }
-      if (best) updates.push({ wall: W, key, point: best });
+      const outDir = key === "end" ? body : [-body[0], -body[1]];
+      const nb = bestNeighbor(W, E, outDir, walls);
+      if (nb) plans.push({ W, key, outDir, U: nb.U, X: nb.X });
     }
   }
-  for (const u of updates) u.wall[u.key] = u.point;
+  // 2) cover/butt 결정 + 새 끝점 + 접합관계 기록
+  for (const p of plans) {
+    const { W, U, X, outDir } = p;
+    const dW = unit(sub(W.end, W.start)), dU = unit(sub(U.end, U.start));
+    const tol = Math.max(W.thickness, U.thickness);
+    const tU = dot(sub(X, U.start), dU), LU = dist(U.start, U.end);
+    const tW = dot(sub(X, W.start), dW), LW = dist(W.start, W.end);
+    const uInterior = tU > tol && tU < LU - tol; // X가 U 몸통 중간(T교차)
+    const wInterior = tW > tol && tW < LW - tol;
+    let cover;
+    if (uInterior && !wInterior) cover = false;      // W가 U 몸통에 붙음 → W는 butt
+    else if (wInterior && !uInterior) cover = true;  // U가 W 몸통에 붙음 → W가 cover
+    else cover = isCover(W, U);                       // L코너: 규칙으로 결정
+    const half = U.thickness / 2;
+    // cover는 코너를 덮도록 이웃 두께 절반만큼 더 나가고, butt는 그만큼 물러난다.
+    p.point = cover ? add(X, mul(outDir, half)) : sub(X, mul(outDir, half));
+    p.join = { to: U.id, self: p.key === "start" ? "ATSTART" : "ATEND", other: connAt(U, X) };
+  }
+  // 3) 일괄 적용 (연쇄 이동 방지)
+  for (const p of plans) {
+    p.W[p.key] = p.point;
+    (p.W.joins ||= []).push(p.join);
+  }
+}
+
+// 벽 W의 끝점 E에서 바깥(outDir)으로 만나는 가장 가까운 (평행하지 않은) 벽을 찾는다.
+function bestNeighbor(W, E, outDir, walls) {
+  const dW = unit(sub(W.end, W.start));
+  let best = null, bestD = Infinity;
+  for (const U of walls) {
+    if (U === W) continue;
+    const dU = unit(sub(U.end, U.start));
+    if (Math.abs(cross(dW, dU)) < 0.05) continue;          // 평행 → 모서리 아님
+    const X = lineIntersect(W.start, dW, U.start, dU);
+    if (!X) continue;
+    const d = dist(X, E);
+    const maxReach = 2.5 * Math.max(W.thickness, U.thickness);
+    if (d > maxReach) continue;
+    const reach = dot(sub(X, E), outDir);                  // 바깥 방향 연장 거리(음수=안쪽)
+    const tol = Math.max(W.thickness, U.thickness);
+    if (reach < -tol) continue;                            // 뒤로 너무 들어가면 제외
+    const tU = dot(sub(X, U.start), dU), LU = dist(U.start, U.end);
+    if (tU < -tol || tU > LU + tol) continue;              // 교점이 U 선분(여유) 밖
+    if (d < bestD) { bestD = d; best = { U, X }; }
+  }
+  return best;
+}
+
+// L코너에서 코너를 덮는(cover) 벽 선택: 더 수평인 벽 → 더 긴 벽 → id 순(안정적).
+function isCover(W, U) {
+  const dW = unit(sub(W.end, W.start)), dU = unit(sub(U.end, U.start));
+  const hW = Math.abs(dW[0]), hU = Math.abs(dU[0]);
+  if (Math.abs(hW - hU) > 1e-3) return hW > hU;
+  const lW = dist(W.start, W.end), lU = dist(U.start, U.end);
+  if (Math.abs(lW - lU) > 1e-6) return lW > lU;
+  return String(W.id) < String(U.id);
+}
+
+// 점 X가 벽 U의 어디에 닿는지 → 접합 위치
+function connAt(U, X) {
+  const t = dot(sub(X, U.start), unit(sub(U.end, U.start)));
+  const L = dist(U.start, U.end);
+  const tol = Math.max(U.thickness, 1);
+  if (t <= tol) return "ATSTART";
+  if (t >= L - tol) return "ATEND";
+  return "ATPATH";
 }
 
 // 두 무한직선(점 p·방향 d, 점 q·방향 e)의 교점. 평행이면 null.
@@ -595,7 +659,8 @@ function bboxNear(a, b, gap) {
          a.minY - gap <= b.maxY && b.minY - gap <= a.maxY;
 }
 
-// 기둥 형상 추출: 원 → 외접 사각, 닫힌 폴리라인 → bbox
+// 기둥 형상 추출: 원 → 외접 사각(박스), 닫힌 폴리라인 → 실제 다각형(비정형).
+// 반환에 profile 이 있으면 사각이 아닌 실제 형상으로 만든다.
 function columnFrom(p) {
   if (p.kind === "circle") {
     return { center: p.center, w: p.radius * 2, d: p.radius * 2 };
@@ -604,9 +669,107 @@ function columnFrom(p) {
     const xs = p.points.map((q) => q[0]), ys = p.points.map((q) => q[1]);
     const minX = Math.min(...xs), maxX = Math.max(...xs);
     const minY = Math.min(...ys), maxY = Math.max(...ys);
-    return { center: [(minX + maxX) / 2, (minY + maxY) / 2], w: maxX - minX, d: maxY - minY };
+    const box = { center: [(minX + maxX) / 2, (minY + maxY) / 2], w: maxX - minX, d: maxY - minY };
+    // 직사각형이 아니면 실제 형상을 프로파일로 (subtractColumns는 bbox 사용)
+    if (!isRectangle(p.points)) box.profile = p.points;
+    return box;
   }
   return null;
+}
+
+// 점열이 (거의) 축정렬 직사각형인가 — 4~5점이고 모두 bbox 모서리 근처
+function isRectangle(pts) {
+  const uniq = pts.filter((q, i) => i === 0 || dist(q, pts[i - 1]) > 1e-6);
+  if (uniq.length !== 4) return false;
+  const xs = uniq.map((q) => q[0]), ys = uniq.map((q) => q[1]);
+  const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+  const tol = Math.max(1, (maxX - minX + maxY - minY) * 0.02);
+  return uniq.every((q) =>
+    (Math.abs(q[0] - minX) < tol || Math.abs(q[0] - maxX) < tol) &&
+    (Math.abs(q[1] - minY) < tol || Math.abs(q[1] - maxY) < tol));
+}
+
+// ── 비정형 벽(프로파일) ──────────────────────────────────────────────
+// 벽 레이어의 닫힌 폴리라인(윤곽)·곡선(호/굽은 폴리라인)을 임의 프로파일 벽으로.
+// 반환: [{ layer, profile:[[x,y]...] }] (도면 단위)
+// 이 벽 원시도형이 (직선 페어링이 아닌) 프로파일 벽으로 처리되는가
+function isProfileWallPrimitive(p) {
+  if (p.kind !== "polyline" || p.points.length < 3) return false;
+  return p.closed || !isStraightPolyline(p.points); // 닫힌 윤곽 또는 곡선
+}
+
+function buildProfileWalls(primitives, mapping, o) {
+  const out = [];
+  const curves = []; // 곡선 개방선 (짝지어 밴드로)
+  for (const p of primitives) {
+    if ((mapping[p.layer] || "ignore") !== "wall") continue;
+    if (!isProfileWallPrimitive(p)) continue;
+    if (p.closed) out.push({ layer: p.layer, profile: p.points });     // 닫힌 윤곽 = 벽 프로파일
+    else curves.push({ layer: p.layer, pts: p.points });               // 곡선 = 중심선/면
+  }
+  const th = o.wallThickness / (o.scale || 1); // 도면 단위 두께
+  const used = new Array(curves.length).fill(false);
+  for (let i = 0; i < curves.length; i++) {
+    if (used[i]) continue;
+    let partner = -1;
+    for (let j = i + 1; j < curves.length; j++) {
+      if (!used[j] && offsetPartner(curves[i].pts, curves[j].pts, th)) { partner = j; break; }
+    }
+    if (partner >= 0) {                    // 두 면 곡선 → 밴드
+      used[i] = used[partner] = true;
+      out.push({ layer: curves[i].layer, profile: bandFromFaces(curves[i].pts, curves[partner].pts) });
+    } else {                               // 단일 중심선 곡선 → 두께만큼 오프셋 밴드
+      used[i] = true;
+      out.push({ layer: curves[i].layer, profile: bandFromCenterline(curves[i].pts, th) });
+    }
+  }
+  return out;
+}
+
+// 폴리라인이 (거의) 직선인가 — 모든 세그먼트 방향이 같은가
+function isStraightPolyline(pts) {
+  if (pts.length <= 2) return true;
+  const d0 = unit(sub(pts[1], pts[0]));
+  for (let i = 2; i < pts.length; i++) {
+    if (Math.abs(cross(d0, unit(sub(pts[i], pts[i - 1])))) > 0.03) return false;
+  }
+  return true;
+}
+
+// 두 곡선이 대략 평행하며 두께 범위 내 오프셋 관계인가(벽 양면)
+function offsetPartner(A, B, th) {
+  const m = (a) => a[Math.floor(a.length / 2)];
+  const d = dist(m(A), m(B));
+  if (d < 0.2 * th || d > 3 * th) return false;
+  const dA = unit(sub(A[A.length - 1], A[0])), dB = unit(sub(B[B.length - 1], B[0]));
+  return Math.abs(cross(dA, dB)) < 0.4;
+}
+
+// 두 면 곡선 → 닫힌 밴드 다각형 (A 진행 후 B 역방향)
+function bandFromFaces(A, B) {
+  const dA = unit(sub(A[A.length - 1], A[0])), dB = unit(sub(B[B.length - 1], B[0]));
+  const Bord = dot(dA, dB) > 0 ? [...B].reverse() : B;
+  return [...A, ...Bord];
+}
+
+// 중심선 곡선 → 두께 th 밴드 (양쪽 오프셋)
+function bandFromCenterline(C, th) {
+  const left = offsetPolyline(C, th / 2);
+  const right = offsetPolyline(C, -th / 2);
+  return [...left, ...right.reverse()];
+}
+
+// 폴리라인을 법선 방향으로 dist 만큼 오프셋 (정점 법선 = 인접 세그먼트 법선 평균)
+function offsetPolyline(pts, dist) {
+  const res = [];
+  for (let i = 0; i < pts.length; i++) {
+    let nx = 0, ny = 0;
+    if (i > 0) { const d = unit(sub(pts[i], pts[i - 1])); nx += -d[1]; ny += d[0]; }
+    if (i < pts.length - 1) { const d = unit(sub(pts[i + 1], pts[i])); nx += -d[1]; ny += d[0]; }
+    const L = Math.hypot(nx, ny) || 1;
+    res.push([pts[i][0] + (nx / L) * dist, pts[i][1] + (ny / L) * dist]);
+  }
+  return res;
 }
 
 const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
