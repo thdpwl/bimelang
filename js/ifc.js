@@ -174,9 +174,9 @@ export function exportIFC(model) {
   }
 
   // 벽 결합(join): 도면에서 이어지는 벽을 IfcRelConnectsPathElements로 접합.
-  // 두 벽이 접합점을 공유하면 각 벽 기준 위치(ATSTART/ATEND/ATPATH)를 기록한다.
-  for (const rel of wallJoinRels(wallRefs)) {
-    add(`IFCRELCONNECTSPATHELEMENTS('${gid()}',${owner},$,$,$,${rel.a},${rel.b},(0),(0),${rel.ca},${rel.cb});`);
+  // 각 벽 기준 접합 위치(ATSTART/ATEND/ATPATH)를 기록한다.
+  for (const rel of collectWallJoins(wallRefs)) {
+    add(`IFCRELCONNECTSPATHELEMENTS('${gid()}',${owner},$,$,$,${rel.a},${rel.b},(0),(0),.${rel.ca}.,.${rel.cb}.);`);
   }
 
   // 요소를 층에 공간적으로 포함
@@ -216,6 +216,14 @@ function esc(s) {
 // 요소별 2D 발자국(footprint) + 바닥높이(z0) + 압출깊이(depth).
 // 모든 요소를 "XY 평면의 닫힌 다각형을 +Z로 압출"하는 방식으로 통일.
 function footprint(el) {
+  // 비정형 프로파일(임의 다각형)이 있으면 그대로 수직 압출 — 곡선/사선/두께 비일정 벽·기둥.
+  if (Array.isArray(el.profile) && el.profile.length >= 3) {
+    return {
+      pts: el.profile.map((p) => [p[0], p[1]]),
+      z0: el.elevation || 0,
+      depth: el.height ?? el.thickness ?? 0,
+    };
+  }
   if (el.type === "wall") {
     const [x1, y1] = el.start, [x2, y2] = el.end;
     const dx = x2 - x1, dy = y2 - y1;
@@ -258,40 +266,52 @@ function footprint(el) {
   return null;
 }
 
-// 벽 결합(join) 관계 산출: 접합점을 공유하는 벽 쌍을 찾아
-// 각 벽 기준 접합 위치(ATSTART/ATEND/ATPATH)를 매긴다.
-// 반환: [{ a, b, ca, cb }]  (a,b=벽 참조 #n, ca/cb=IfcConnectionTypeEnum)
-function wallJoinRels(wallRefs) {
-  const TOL = 1; // mm, 접합점 일치 허용
-  // 점 p가 벽 el의 어디에 닿는지 → 접합 타입 문자열 or null
+// 벽 결합(join) 관계 산출. 반환: [{ a, b, ca, cb }] (a,b=#n 참조, ca/cb=점 없는 enum 이름)
+// 우선 변환 단계에서 기록된 el.joins 를 쓰고, 없으면(수작업 모델) 기하로 공유 끝점을 찾는다.
+function collectWallJoins(wallRefs) {
+  const refById = new Map(wallRefs.map((w) => [w.el.id, w.ref]));
+  const seen = new Set();
+  const rels = [];
+  // 1) 변환 단계에서 기록된 접합 관계
+  for (const { el, ref } of wallRefs) {
+    for (const j of el.joins || []) {
+      const other = refById.get(j.to);
+      if (!other) continue;
+      const kpair = [String(el.id), String(j.to)].sort().join("|");
+      if (seen.has(kpair)) continue;
+      seen.add(kpair);
+      rels.push({ a: ref, b: other, ca: j.self, cb: j.other });
+    }
+  }
+  if (rels.length) return rels;
+
+  // 2) joins 정보가 없는 모델: 접합점을 공유하는 벽 쌍을 기하로 탐지
+  const TOL = 1; // mm
+  const near = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]) <= TOL;
   const connType = (el, p) => {
-    const near = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]) <= TOL;
-    if (near(p, el.start)) return ".ATSTART.";
-    if (near(p, el.end)) return ".ATEND.";
+    if (near(p, el.start)) return "ATSTART";
+    if (near(p, el.end)) return "ATEND";
     const dx = el.end[0] - el.start[0], dy = el.end[1] - el.start[1];
     const L = Math.hypot(dx, dy) || 1;
     const ux = dx / L, uy = dy / L;
-    const t = (p[0] - el.start[0]) * ux + (p[1] - el.start[1]) * uy;      // 축 방향 위치
-    const perp = Math.abs((p[0] - el.start[0]) * -uy + (p[1] - el.start[1]) * ux); // 축선까지 수직거리
-    if (perp <= TOL && t > TOL && t < L - TOL) return ".ATPATH.";         // 축선 중간(T교차)
+    const t = (p[0] - el.start[0]) * ux + (p[1] - el.start[1]) * uy;
+    const perp = Math.abs((p[0] - el.start[0]) * -uy + (p[1] - el.start[1]) * ux);
+    if (perp <= TOL && t > TOL && t < L - TOL) return "ATPATH";
     return null;
   };
-  const rels = [];
   for (let i = 0; i < wallRefs.length; i++) {
     for (let j = i + 1; j < wallRefs.length; j++) {
       const A = wallRefs[i], B = wallRefs[j];
-      let pt = null, ca = null, cb = null;
-      // A의 끝점이 B에 닿는가
+      let ca = null, cb = null;
       for (const p of [A.el.start, A.el.end]) {
         const t = connType(B.el, p);
-        if (t) { pt = p; cb = t; ca = connType(A.el, p); break; }
+        if (t) { cb = t; ca = connType(A.el, p); break; }
       }
-      // 아니면 B의 끝점이 A의 축선(T)에 닿는가
-      if (!pt) for (const p of [B.el.start, B.el.end]) {
+      if (!ca) for (const p of [B.el.start, B.el.end]) {
         const t = connType(A.el, p);
-        if (t) { pt = p; ca = t; cb = connType(B.el, p); break; }
+        if (t) { ca = t; cb = connType(B.el, p); break; }
       }
-      if (pt && ca && cb) rels.push({ a: A.ref, b: B.ref, ca, cb });
+      if (ca && cb) rels.push({ a: A.ref, b: B.ref, ca, cb });
     }
   }
   return rels;

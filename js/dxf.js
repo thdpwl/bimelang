@@ -1,11 +1,15 @@
-// 최소 DXF 파서 (MVP). ASCII DXF의 ENTITIES 섹션에서
-// LINE / LWPOLYLINE / POLYLINE+VERTEX / CIRCLE 를 추출한다.
+// 최소 DXF 파서 (MVP). ASCII DXF에서
+// LINE / LWPOLYLINE / POLYLINE+VERTEX / CIRCLE / ARC / INSERT(블록) 를 추출한다.
 // 반환: { primitives: [...], layers: {name: count}, insunits: number|null }
 //
 // primitive 형태:
 //  { kind:'line',     layer, points:[[x,y],[x,y]] }
 //  { kind:'polyline', layer, points:[[x,y]...], closed }
 //  { kind:'circle',   layer, center:[x,y], radius }
+//
+// 문·창·기둥은 실제 도면에서 대부분 블록(INSERT)이나 호(ARC)로 그려지므로,
+// BLOCKS 섹션의 블록 정의를 읽어 INSERT를 실제 도형으로 펼치고(스케일·회전·이동 반영),
+// ARC는 폴리라인(샘플 점)으로 변환한다.
 
 const num = (v) => parseFloat(v);
 
@@ -28,22 +32,51 @@ export function parseDXF(text) {
     }
   }
 
-  // ENTITIES 섹션으로 이동
-  let i = 0;
-  while (i < pairs.length && !(pairs[i].code === 2 && pairs[i].value === "ENTITIES")) i++;
-  i++;
+  // 지정한 이름의 섹션 [start,end) 범위(코드 페어 인덱스). 없으면 null.
+  const sectionRange = (name) => {
+    let s = -1;
+    for (let i = 0; i < pairs.length - 1; i++) {
+      if (pairs[i].code === 0 && pairs[i].value === "SECTION" &&
+          pairs[i + 1].code === 2 && pairs[i + 1].value === name) { s = i + 2; break; }
+    }
+    if (s < 0) return null;
+    let e = s;
+    for (; e < pairs.length; e++) if (pairs[e].code === 0 && pairs[e].value === "ENDSEC") break;
+    return [s, e];
+  };
 
-  // 엔티티 단위로 코드 묶기
-  const ents = [];
-  let cur = null;
-  for (; i < pairs.length; i++) {
-    const { code, value } = pairs[i];
-    if (code === 0) {
-      if (cur) ents.push(cur);
-      if (value === "ENDSEC" || value === "EOF") { cur = null; break; }
-      cur = { type: value, codes: [] };
-    } else if (cur) {
-      cur.codes.push({ code, value });
+  // [start,end) 범위의 페어를 엔티티 단위(코드 0 경계)로 묶는다.
+  const groupEntities = (range) => {
+    const ents = [];
+    if (!range) return ents;
+    let cur = null;
+    for (let i = range[0]; i < range[1]; i++) {
+      const { code, value } = pairs[i];
+      if (code === 0) {
+        if (value === "ENDSEC" || value === "EOF") break;
+        cur = { type: value, codes: [] };
+        ents.push(cur);
+      } else if (cur) {
+        cur.codes.push({ code, value });
+      }
+    }
+    return ents;
+  };
+
+  // BLOCKS 섹션: 블록 이름 → { base:[x,y], ents:[...] }
+  const blocks = {};
+  {
+    const bents = groupEntities(sectionRange("BLOCKS"));
+    for (let i = 0; i < bents.length; i++) {
+      if (bents[i].type !== "BLOCK") continue;
+      const g = (c) => bents[i].codes.find((x) => x.code === c)?.value;
+      const name = g(2) || "";
+      const base = [num(g(10)) || 0, num(g(20)) || 0];
+      const inner = [];
+      let j = i + 1;
+      for (; j < bents.length && bents[j].type !== "ENDBLK"; j++) inner.push(bents[j]);
+      if (name) blocks[name] = { base, ents: inner };
+      i = j; // ENDBLK 로 점프
     }
   }
 
@@ -52,50 +85,89 @@ export function parseDXF(text) {
   const note = (layer) => { layers[layer] = (layers[layer] || 0) + 1; };
   const layerOf = (codes) => (codes.find((c) => c.code === 8)?.value) || "0";
 
-  for (let k = 0; k < ents.length; k++) {
-    const e = ents[k];
-    const layer = layerOf(e.codes);
-
-    if (e.type === "LINE") {
+  // 엔티티 목록 → primitives. tf: 점 변환(월드 좌표), layerCtx: 상위(INSERT) 레이어, depth: 재귀 깊이.
+  const emit = (ents, tf, layerCtx, depth) => {
+    for (let k = 0; k < ents.length; k++) {
+      const e = ents[k];
       const g = (c) => e.codes.find((x) => x.code === c)?.value;
-      const p = [[num(g(10)), num(g(20))], [num(g(11)), num(g(21))]];
-      if (valid(p[0]) && valid(p[1])) { primitives.push({ kind: "line", layer, points: p }); note(layer); }
+      let layer = layerOf(e.codes);
+      if ((layer === "0" || layer === "") && layerCtx) layer = layerCtx; // 블록 내부 레이어0 → INSERT 레이어
 
-    } else if (e.type === "CIRCLE") {
-      const g = (c) => e.codes.find((x) => x.code === c)?.value;
-      const center = [num(g(10)), num(g(20))];
-      const radius = num(g(40));
-      if (valid(center) && radius > 0) { primitives.push({ kind: "circle", layer, center, radius }); note(layer); }
+      if (e.type === "LINE") {
+        const p = [tf([num(g(10)), num(g(20))]), tf([num(g(11)), num(g(21))])];
+        if (valid(p[0]) && valid(p[1])) { primitives.push({ kind: "line", layer, points: p }); note(layer); }
 
-    } else if (e.type === "LWPOLYLINE") {
-      const pts = [];
-      let x = null;
-      let closed = false;
-      for (const c of e.codes) {
-        if (c.code === 70) closed = (parseInt(c.value, 10) & 1) === 1;
-        else if (c.code === 10) x = num(c.value);
-        else if (c.code === 20 && x !== null) { pts.push([x, num(c.value)]); x = null; }
+      } else if (e.type === "CIRCLE") {
+        const center = tf([num(g(10)), num(g(20))]);
+        const radius = num(g(40));
+        if (valid(center) && radius > 0) { primitives.push({ kind: "circle", layer, center, radius }); note(layer); }
+
+      } else if (e.type === "ARC") {
+        const c = [num(g(10)), num(g(20))], r = num(g(40));
+        const pts = valid(c) && r > 0 ? sampleArc(c, r, num(g(50)) || 0, num(g(51)) || 0).map(tf) : [];
+        if (pts.length >= 2) { primitives.push({ kind: "polyline", layer, points: pts, closed: false }); note(layer); }
+
+      } else if (e.type === "LWPOLYLINE") {
+        const pts = [];
+        let x = null, closed = false;
+        for (const c of e.codes) {
+          if (c.code === 70) closed = (parseInt(c.value, 10) & 1) === 1;
+          else if (c.code === 10) x = num(c.value);
+          else if (c.code === 20 && x !== null) { pts.push(tf([x, num(c.value)])); x = null; }
+        }
+        if (pts.length >= 2) { primitives.push({ kind: "polyline", layer, points: pts, closed }); note(layer); }
+
+      } else if (e.type === "POLYLINE") {
+        // 구형 POLYLINE: 뒤따르는 VERTEX 들을 SEQEND 까지 수집
+        let closed = false;
+        const flag = e.codes.find((c) => c.code === 70);
+        if (flag) closed = (parseInt(flag.value, 10) & 1) === 1;
+        const pts = [];
+        let j = k + 1;
+        for (; j < ents.length && ents[j].type === "VERTEX"; j++) {
+          const gg = (c) => ents[j].codes.find((x) => x.code === c)?.value;
+          const pt = tf([num(gg(10)), num(gg(20))]);
+          if (valid(pt)) pts.push(pt);
+        }
+        k = j - 1; // VERTEX 만큼 건너뛰기 (SEQEND 는 다음 루프에서 무시)
+        if (pts.length >= 2) { primitives.push({ kind: "polyline", layer, points: pts, closed }); note(layer); }
+
+      } else if (e.type === "INSERT") {
+        // 블록 참조: 블록 정의를 스케일·회전·이동 반영해 펼친다.
+        if (depth > 4) continue;
+        const blk = blocks[g(2)];
+        if (!blk) continue;
+        const ins = [num(g(10)) || 0, num(g(20)) || 0];
+        const sx = num(g(41)), sy = num(g(42));
+        const scaleX = Number.isFinite(sx) && sx !== 0 ? sx : 1;
+        const scaleY = Number.isFinite(sy) && sy !== 0 ? sy : 1;
+        const rot = (num(g(50)) || 0) * Math.PI / 180, cos = Math.cos(rot), sin = Math.sin(rot);
+        const [bx, by] = blk.base;
+        // 블록좌표 p → (p-base)*scale → 회전 → +insertion → 상위 tf
+        const bt = (p) => {
+          const lx = (p[0] - bx) * scaleX, ly = (p[1] - by) * scaleY;
+          return tf([ins[0] + lx * cos - ly * sin, ins[1] + lx * sin + ly * cos]);
+        };
+        emit(blk.ents, bt, (layer === "0" || layer === "") ? layerCtx : layer, depth + 1);
       }
-      if (pts.length >= 2) { primitives.push({ kind: "polyline", layer, points: pts, closed }); note(layer); }
-
-    } else if (e.type === "POLYLINE") {
-      // 구형 POLYLINE: 뒤따르는 VERTEX 들을 SEQEND 까지 수집
-      let closed = false;
-      const flag = e.codes.find((c) => c.code === 70);
-      if (flag) closed = (parseInt(flag.value, 10) & 1) === 1;
-      const pts = [];
-      let j = k + 1;
-      for (; j < ents.length && ents[j].type === "VERTEX"; j++) {
-        const g = (c) => ents[j].codes.find((x) => x.code === c)?.value;
-        const pt = [num(g(10)), num(g(20))];
-        if (valid(pt)) pts.push(pt);
-      }
-      k = j - 1; // VERTEX 만큼 건너뛰기 (SEQEND 는 다음 루프에서 무시)
-      if (pts.length >= 2) { primitives.push({ kind: "polyline", layer, points: pts, closed }); note(layer); }
     }
-  }
+  };
 
+  emit(groupEntities(sectionRange("ENTITIES")), (p) => p, null, 0);
   return { primitives, layers, insunits };
+}
+
+// 호(ARC)를 점들로 샘플링 (~22.5° 간격). a0,a1: 시작·끝 각(도).
+function sampleArc(c, r, a0deg, a1deg) {
+  let a0 = a0deg * Math.PI / 180, a1 = a1deg * Math.PI / 180;
+  if (a1 <= a0) a1 += 2 * Math.PI;
+  const n = Math.max(2, Math.ceil((a1 - a0) / (Math.PI / 8)));
+  const pts = [];
+  for (let i = 0; i <= n; i++) {
+    const a = a0 + (a1 - a0) * (i / n);
+    pts.push([c[0] + r * Math.cos(a), c[1] + r * Math.sin(a)]);
+  }
+  return pts;
 }
 
 function valid(p) {

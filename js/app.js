@@ -61,7 +61,16 @@ function renderInspector() {
   box.hidden = false;
 
   const rows = [field("name", "이름", el.name, "text")];
-  if (el.type === "wall") {
+  if (el.profile) {
+    // 비정형(프로파일) 요소: 형상은 프로파일이 결정 → 높이·기준높이만 편집.
+    const xs = el.profile.map((p) => p[0]), ys = el.profile.map((p) => p[1]);
+    const w = Math.round(Math.max(...xs) - Math.min(...xs));
+    const d = Math.round(Math.max(...ys) - Math.min(...ys));
+    rows.push(
+      pair(numField("height", "높이", el.height), numField("elevation", "기준 높이(EL)", el.elevation)),
+      `<p class="hint">비정형 ${el.type === "column" ? "기둥" : "벽"} · 외곽 ${w}×${d}mm · ${el.profile.length}점 프로파일</p>`,
+    );
+  } else if (el.type === "wall") {
     const len = Math.round(Math.hypot(el.end[0] - el.start[0], el.end[1] - el.start[1]));
     rows.push(
       pair(numField("start0", "시작 X", el.start[0]), numField("start1", "시작 Y", el.start[1])),
@@ -137,6 +146,8 @@ function resizeSlab(el, newW, newD) {
 function onTransform(mesh) {
   const el = model.elements.find((e) => e.id === mesh.userData.id);
   if (!el) return;
+  // 비정형(프로파일) 요소는 박스 파라미터가 없어 기즈모 분해를 건너뛴다.
+  if (el.profile) { status(`${el.name || el.id} 비정형 객체는 기즈모 편집을 지원하지 않습니다`); return; }
   if (el.type === "wall") {
     Object.assign(el, decomposeWall({
       pos: mesh.position, scale: mesh.scale, rotY: mesh.rotation.y,
